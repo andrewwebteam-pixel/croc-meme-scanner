@@ -773,12 +773,75 @@ async def token_callback_handler(c: CallbackQuery):
     if not ok:
         await c.answer("Access invalid", show_alert=True)
         return
-    mint = c.data.split(":", 1)[1].strip()
-    if not mint:
-        await c.answer("Mint missing", show_alert=True)
+
+    # Ожидаемые форматы: token:<mint>:details | token:<mint>:summary
+    parts = (c.data or "").split(":")
+    if len(parts) < 3:
+        await c.answer("Bad callback", show_alert=True)
         return
-    await c.answer("Opening details…", show_alert=False)
-    await send_token_card(c.message.chat.id, mint)
+    _, mint, action = parts[0], parts[1], parts[2]
+
+    # Загружаем данные (мягкие фоллбеки)
+    extra = None
+    mkts = None
+    async with aiohttp.ClientSession() as session:
+        if BIRDEYE_API_KEY:
+            try:
+                extra = await birdeye_overview(session, mint)
+            except Exception:
+                extra = None
+            try:
+                mkts = await birdeye_markets(session, mint)
+            except Exception:
+                mkts = None
+
+    # Собираем псевдо-пару под рендер (единый формат)
+    p = {
+        "baseToken": {"symbol": (extra or {}).get("symbol") or "", "name": (extra or {}).get("name") or "", "address": mint},
+        "priceUsd": (extra or {}).get("price"),
+        "liquidity": {"usd": (extra or {}).get("liquidity")},
+        "fdv": (extra or {}).get("marketCap"),
+        "volume": {"h24": (extra or {}).get("v24")},
+        "pairCreatedAt": (extra or {}).get("createdAt") or (extra or {}).get("firstTradeAt"),
+        "chainId": "solana",
+    }
+
+    # Фоллбек цены (Jupiter) при необходимости
+    if p.get("priceUsd") is None:
+        jp = await jupiter_price(aiohttp.ClientSession(), mint)
+        try:
+            await (await jp).close()  # на случай, если сессия создастся
+        except Exception:
+            pass
+
+    if action == "details":
+        # Ончейн-блок (Helius) только для details
+        helius_info = None
+        topk_share = None
+        if HELIUS_RPC_URL:
+            async with aiohttp.ClientSession() as hs:
+                try:
+                    helius_info = await helius_get_mint_info(hs, mint)
+                except Exception:
+                    helius_info = None
+                try:
+                    topk_share = await helius_top_holders_share(hs, mint, k=10)
+                except Exception:
+                    topk_share = None
+
+        text = build_details_text(p, extra, mkts, helius_info, topk_share)
+        kb = token_keyboard(p, mode="details")
+    else:
+        text = build_summary_text(p, extra, mkts)
+        kb = token_keyboard(p, mode="summary")
+
+    try:
+        await c.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+    except Exception:
+        # На случай race condition/ограничений Telegram
+        pass
+
+    await c.answer()
 
 @dp.message(F.text)
 async def key_input_handler(m: Message):
