@@ -405,46 +405,50 @@ def birdeye_kv_block(extra: Optional[Dict[str, Any]]) -> str:
     if not extra or not isinstance(extra, dict):
         return "Birdeye: —"
 
-    # Сначала — приоритетные ключи (если есть), затем — прочие простые
+    # Приоритетные ключи выводим первыми
     preferred = [
         "symbol", "name", "price", "marketCap", "liquidity", "v24",
         "createdAt", "firstTradeAt", "holders", "lp_lock_ratio"
     ]
-    simple_items = []
+    simple_items: List[tuple[str, str]] = []
     used = set()
 
     def _fmt_val(k: str, v: Any) -> str:
-        # Числа — как есть; для некоторых ключей — через format_usd
         try:
             if v is None:
                 return "—"
             if k in ("price", "marketCap", "liquidity", "v24"):
                 return format_usd(float(v))
-            if isinstance(v, (int, float)):
-                return f"{v}"
             if isinstance(v, bool):
                 return "yes" if v else "no"
+            if isinstance(v, (int, float)):
+                return f"{v}"
             return str(v)
         except Exception:
             return str(v)
 
-    # Приоритетные
+    # 1) Приоритетные
     for k in preferred:
         if k in extra:
-            simple_items.append((k, _fmt_val(k, extra.get(k))))
+            v = extra.get(k)
+            if isinstance(v, (dict, list)):
+                continue
+            simple_items.append((k, _fmt_val(k, v)))
             used.add(k)
 
-    # Прочие плоские ключи
-    for k, v in extra.items():
+    # 2) Прочие простые ключи (в алфавитном порядке для детерминизма)
+    for k in sorted(extra.keys()):
         if k in used:
             continue
-        if isinstance(v, (str, int, float, bool)) or v is None:
-            simple_items.append((k, _fmt_val(k, v)))
+        v = extra.get(k)
+        if isinstance(v, (dict, list)):
+            continue
+        simple_items.append((k, _fmt_val(k, v)))
 
-    # Финальный текст
+    # Финальный текст (имя ключа в бэктиках — безопасно для Markdown)
     lines = ["Birdeye:"]
     for k, v in simple_items:
-        lines.append(f"- {k}: {v}")
+        lines.append(f"- `{k}`: {v}")
     return "\n".join(lines)
 
 
