@@ -769,13 +769,13 @@ async def token_callback_handler(c: CallbackQuery):
         "chainId": "solana",
     }
 
-    # Фоллбек цены (Jupiter) при необходимости
+        # Фоллбек цены (Jupiter) при необходимости
     if p.get("priceUsd") is None:
-        jp = await jupiter_price(aiohttp.ClientSession(), mint)
-        try:
-            await (await jp).close()  # на случай, если сессия создастся
-        except Exception:
-            pass
+        async with aiohttp.ClientSession() as s2:
+            jp = await jupiter_price(s2, mint)
+            if jp is not None:
+                p["priceUsd"] = jp
+
 
     if action == "details":
         # Ончейн-блок (Helius) только для details
