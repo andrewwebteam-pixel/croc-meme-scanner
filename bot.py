@@ -395,16 +395,65 @@ def token_card(p: Dict[str, Any], extra: Optional[Dict[str, Any]], extra_flags: 
 
     return "\n".join(lines)
 
-def token_keyboard(p: Dict[str, Any]) -> InlineKeyboardMarkup:
+# === Text builders for summary/details ===
+def build_summary_text(p: Dict[str, Any], extra: Optional[Dict[str, Any]], mkts: Optional[List[Dict[str, Any]]]) -> str:
+    # Короткая карточка без ончейн-блока и без предупреждений
+    return token_card(p, extra, extra_flags=None)
+
+def build_details_text(
+    p: Dict[str, Any],
+    extra: Optional[Dict[str, Any]],
+    mkts: Optional[List[Dict[str, Any]]],
+    helius_info: Optional[Dict[str, Any]],
+    topk_share: Optional[float]
+) -> str:
+    # Ончейн-блок
+    add_lines = []
+    mint_active = False
+    freeze_active = False
+    if helius_info:
+        mint_txt = format_authority(helius_info.get('mintAuthority'))
+        freeze_txt = format_authority(helius_info.get('freezeAuthority'))
+        mint_active = (helius_info.get('mintAuthority') is not None)
+        freeze_active = (helius_info.get('freezeAuthority') is not None)
+        add_lines.append(f"Mint authority: {mint_txt}")
+        add_lines.append(f"Freeze authority: {freeze_txt}")
+    else:
+        add_lines.append("Mint authority: —")
+        add_lines.append("Freeze authority: —")
+    add_lines.append(f"Top-10 holders: {format_topk_share(topk_share)}")
+
+    # Флаги риска
+    flags = risk_flags(mint_active, freeze_active, topk_share)
+
+    # Подсказка по плану, если нет Birdeye overview
+    plan_hint = ""
+    if not extra:
+        plan_hint = "\n_Birdeye plan: basic — detailed stats hidden_"
+
+    ex_block = exchanges_block(mkts)
+    core = token_card(p, extra, extra_flags=flags)
+    return core + "\n" + "\n".join(add_lines) + plan_hint + "\n\n" + ex_block
+
+
+def token_keyboard(p: Dict[str, Any], mode: str = "summary") -> InlineKeyboardMarkup:
     base = p.get("baseToken", {}) or {}
     mint = base.get("address", "")
     be_link = f"https://birdeye.so/token/{mint}?chain=solana" if mint else "https://birdeye.so/solana"
     solscan_link = f"https://solscan.io/token/{mint}" if mint else "https://solscan.io"
+
+    # Тоггл-ряд
+    if mode == "summary":
+        first_row = [InlineKeyboardButton(text="ℹ️ Details", callback_data=f"token:{mint}:details")]
+    else:
+        first_row = [InlineKeyboardButton(text="◀ Back", callback_data=f"token:{mint}:summary")]
+
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="ℹ️ Details", callback_data=f"token:{mint}")],
+        first_row,
         [InlineKeyboardButton(text="Open on Birdeye", url=be_link)],
         [InlineKeyboardButton(text="Open on Solscan", url=solscan_link)],
     ])
+
 
 # === Helius RPC helpers ===
 async def helius_rpc(session: aiohttp.ClientSession, method: str, params: list) -> Optional[dict]:
