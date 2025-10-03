@@ -368,10 +368,35 @@ def token_card(p: Dict[str, Any], extra: Optional[Dict[str, Any]], extra_flags: 
     lp_lock = extract_lp_lock_ratio(extra or {}) if extra else None
 
     risk = []
-    if liq_usd is not None and liq_usd < 10_000: risk.append("Low liquidity")
-    if vol24  is not None and vol24  <  5_000:  risk.append("Low volume")
+    # Базовые метрики
+    if liq_usd is not None and liq_usd < 10_000:
+        risk.append("Low liquidity")
+    if vol24 is not None and vol24 < 5_000:
+        risk.append("Low volume")
+
+    # Дополнительные (UI-02B расширение)
+    # 1) LP lock
+    if lp_lock is not None:
+        try:
+            if float(lp_lock) < 20.0:
+                risk.append("Low LP lock (<20%)")
+        except Exception:
+            pass
+
+    # 2) Возраст токена
+    # age_dt уже вычислен выше; считаем часы и помечаем совсем свежие
+    if age_dt:
+        try:
+            hrs = int((datetime.now(tz=timezone.utc) - age_dt).total_seconds() // 3600)
+            if hrs < 6:
+                risk.append("New token (<6h)")
+        except Exception:
+            pass
+
+    # Рисковые флаги из details (Mint/Freeze/Top-10)
     if extra_flags:
         risk.extend(extra_flags)
+
 
     lines = [
         f"🐊 *${symbol}* — {name}",
