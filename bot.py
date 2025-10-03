@@ -400,6 +400,54 @@ def build_summary_text(p: Dict[str, Any], extra: Optional[Dict[str, Any]], mkts:
     # Короткая карточка без ончейн-блока и без предупреждений
     return token_card(p, extra, extra_flags=None)
 
+# Отформатировать блок "все доступные поля" из Birdeye (плоские ключи)
+def birdeye_kv_block(extra: Optional[Dict[str, Any]]) -> str:
+    if not extra or not isinstance(extra, dict):
+        return "Birdeye: —"
+
+    # Сначала — приоритетные ключи (если есть), затем — прочие простые
+    preferred = [
+        "symbol", "name", "price", "marketCap", "liquidity", "v24",
+        "createdAt", "firstTradeAt", "holders", "lp_lock_ratio"
+    ]
+    simple_items = []
+    used = set()
+
+    def _fmt_val(k: str, v: Any) -> str:
+        # Числа — как есть; для некоторых ключей — через format_usd
+        try:
+            if v is None:
+                return "—"
+            if k in ("price", "marketCap", "liquidity", "v24"):
+                return format_usd(float(v))
+            if isinstance(v, (int, float)):
+                return f"{v}"
+            if isinstance(v, bool):
+                return "yes" if v else "no"
+            return str(v)
+        except Exception:
+            return str(v)
+
+    # Приоритетные
+    for k in preferred:
+        if k in extra:
+            simple_items.append((k, _fmt_val(k, extra.get(k))))
+            used.add(k)
+
+    # Прочие плоские ключи
+    for k, v in extra.items():
+        if k in used:
+            continue
+        if isinstance(v, (str, int, float, bool)) or v is None:
+            simple_items.append((k, _fmt_val(k, v)))
+
+    # Финальный текст
+    lines = ["Birdeye:"]
+    for k, v in simple_items:
+        lines.append(f"- {k}: {v}")
+    return "\n".join(lines)
+
+
 def build_details_text(
     p: Dict[str, Any],
     extra: Optional[Dict[str, Any]],
@@ -407,7 +455,16 @@ def build_details_text(
     helius_info: Optional[Dict[str, Any]],
     topk_share: Optional[float]
 ) -> str:
-    # Ончейн-блок
+    # Локальные форматтеры
+    def f_pct(v: Optional[float]) -> str:
+        try:
+            if v is None:
+                return "—"
+            return f"{float(v):.2f}%"
+        except Exception:
+            return "—"
+
+    # Ончейн-блок (mint/freeze)
     add_lines = []
     mint_active = False
     freeze_active = False
@@ -421,7 +478,9 @@ def build_details_text(
     else:
         add_lines.append("Mint authority: —")
         add_lines.append("Freeze authority: —")
-    add_lines.append(f"Top-10 holders: {format_topk_share(topk_share)}")
+
+    # Топ-10 концентрация
+    add_lines.append(f"Top-10 holders: {f_pct(topk_share)}")
 
     # Флаги риска
     flags = risk_flags(mint_active, freeze_active, topk_share)
@@ -431,9 +490,27 @@ def build_details_text(
     if not extra:
         plan_hint = "\n_Birdeye plan: basic — detailed stats hidden_"
 
+    # Детализированный блок Birdeye (все доступные поля, плоский вывод)
+    be_block = birdeye_kv_block(extra)
+
+    # DEX (top-2) — как и раньше
     ex_block = exchanges_block(mkts)
+
+    # Базовая карточка + флаги риска
     core = token_card(p, extra, extra_flags=flags)
-    return core + "\n" + "\n".join(add_lines) + plan_hint + "\n\n" + ex_block
+
+    # Склейка финального текста (ядро + ончейн + подсказка + birdeye + DEX)
+    parts = [
+        core,
+        "\n".join(add_lines),
+        plan_hint.strip(),
+        be_block,
+        ex_block
+    ]
+    # Удаляем пустые элементы и объединяем
+    parts = [x for x in parts if x and x.strip()]
+    return "\n\n".join(parts)
+
 
 
 def token_keyboard(p: Dict[str, Any], mode: str = "summary") -> InlineKeyboardMarkup:
@@ -769,7 +846,7 @@ async def token_callback_handler(c: CallbackQuery):
         "chainId": "solana",
     }
 
-        # Фоллбек цены (Jupiter) при необходимости
+    # Фоллбек цены (Jupiter) при необходимости
     if p.get("priceUsd") is None:
         async with aiohttp.ClientSession() as s2:
             jp = await jupiter_price(s2, mint)
