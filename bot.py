@@ -600,6 +600,7 @@ async def logout_handler(m: Message):
     await m.answer("🔒 Key unlinked. Send a new key or /start.")
 
 # ======= SHARED RENDER =======
+# ======= SHARED RENDER =======
 async def send_token_card(chat_id: int, mint: str):
     extra = None
     mkts  = None
@@ -626,54 +627,16 @@ async def send_token_card(chat_id: int, mint: str):
             "chainId": "solana",
         }
 
-        # Jupiter price fallback
+        # Jupiter price fallback (if Birdeye has no price)
         if p.get("priceUsd") is None:
             jp = await jupiter_price(session, mint)
             if jp is not None:
                 p["priceUsd"] = jp
 
-    # Helius on-chain add-ons
-    helius_info = None
-    topk_share = None
-    if HELIUS_RPC_URL:
-        async with aiohttp.ClientSession() as hs:
-            try:
-                helius_info = await helius_get_mint_info(hs, mint)
-            except Exception:
-                helius_info = None
-            try:
-                topk_share  = await helius_top_holders_share(hs, mint, k=10)
-            except Exception:
-                topk_share = None
-
-    add_lines = []
-    mint_active = False
-    freeze_active = False
-    if helius_info:
-        mint_txt = format_authority(helius_info.get('mintAuthority'))
-        freeze_txt = format_authority(helius_info.get('freezeAuthority'))
-        mint_active = (helius_info.get('mintAuthority') is not None)
-        freeze_active = (helius_info.get('freezeAuthority') is not None)
-        add_lines.append(f"Mint authority: {mint_txt}")
-        add_lines.append(f"Freeze authority: {freeze_txt}")
-    else:
-        add_lines.append("Mint authority: —")
-        add_lines.append("Freeze authority: —")
-    add_lines.append(f"Top-10 holders: {format_topk_share(topk_share)}")
-
-    # Risk flags (on-chain + concentration)
-    flags = risk_flags(mint_active, freeze_active, topk_share)
-
-    # Plan hint if Birdeye overview absent
-    plan_hint = ""
-    if not extra:
-        plan_hint = "\n_Birdeye plan: basic — detailed stats hidden_"
-
-    text = token_card(p, extra, extra_flags=flags) + "\n" + "\n".join(add_lines) + plan_hint
-    ex_block = exchanges_block(mkts)
-    kb = token_keyboard(p)
-
-    await bot.send_message(chat_id, text + "\n\n" + ex_block, reply_markup=kb, disable_web_page_preview=True)
+    # SUMMARY only (no on-chain and no exchanges block here)
+    text = build_summary_text(p, extra, mkts)
+    kb = token_keyboard(p, mode="summary")
+    await bot.send_message(chat_id, text, reply_markup=kb, disable_web_page_preview=True)
 
 # ======= HANDLERS =======
 @dp.message(Command("scan"))
