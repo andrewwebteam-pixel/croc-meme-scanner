@@ -58,7 +58,7 @@ STR = {
     "key_invalid": "⛔ Invalid key.",
     "token_not_found": "⛔ Token not found. Please try again.",
     "bad_callback": "Bad callback.",
-    "session_expired": "Session expired. Please run /scan again."
+    "session_expired": "Session expired. Please run /scan again.",
     "enter_key": "Please enter your access key:",
     "no_active_access": "⛔ No active access. Send your key or use /start.",
     "key_unlinked": "✅ Key unlinked. Send a new key or /start.",
