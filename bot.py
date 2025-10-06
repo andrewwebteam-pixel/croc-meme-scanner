@@ -748,9 +748,9 @@ dp = Dispatcher()
 @dp.message(Command("start"))
 async def start_handler(m: Message):
     if get_user_key(m.from_user.id):
-        await m.answer(STR["start"].format(product=PRODUCT))
+        await m.answer(STR["start"].format(product=PRODUCT), parse_mode=None)
     else:
-        await m.answer(STR["enter_key"])
+        await m.answer(STR["enter_key"], parse_mode=None)
 
 @dp.message(Command("help"))
 async def help_handler(m: Message):
@@ -760,8 +760,8 @@ async def help_handler(m: Message):
 async def my_handler(m: Message):
     key = get_user_key(m.from_user.id)
     if not key:
-    await m.answer(STR["no_active_access"])
-    return
+        await m.answer(STR["no_active_access"])
+        return
     ok, msg = is_key_valid_for_product(key)
     status = "✅ Active" if ok else "⛔ Inactive"
     await m.answer(f"Your key: `{key}`\nStatus: {status}\n{msg}", parse_mode="Markdown")
