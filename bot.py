@@ -33,6 +33,34 @@ assert BOT_TOKEN, "BOT_TOKEN is required"
 
 BIRDEYE_BASE = "https://public-api.birdeye.so"
 
+# === User-facing strings (UI-04) ===
+STR = {
+    "no_access": "⛔ No access. Please enter your key via /start.",
+    "access_invalid": "⛔ Access invalid: {msg}\nSend a new key.",
+    "cooldown": "⏳ Please wait {remaining}s before using /scan again (anti-spam).",
+    "no_pairs": (
+        "😕 No fresh pairs available via Birdeye on the current plan.\n"
+        "Try `/token <mint>` or upgrade your data plan."
+    ),
+    "scan_progress": "🔍 Scanning Solana pairs… ({i}/{n})",
+    "start": "Welcome to the {product} bot! Use /help to see commands.",
+    "help": (
+        "Commands:\n"
+        "/token <mint> — get details on a token\n"
+        "/scan — scan fresh pairs\n"
+        "/my — show your subscription status\n"
+        "/logout — remove your key\n"
+        "/help — show this help"
+    ),
+    "logged_out": "✅ Your key has been removed. Goodbye!",
+    "no_key": "You have no key saved. Use /start to enter a key.",
+    "key_saved": "✅ Access key saved.",
+    "key_invalid": "⛔ Invalid key.",
+    "token_not_found": "⛔ Token not found. Please try again.",
+    "bad_callback": "Bad callback.",
+    "session_expired": "Session expired. Please run /scan again."
+}
+
 # === Simple in-memory cache for /scan results ===
 SCAN_CACHE_TTL = 15  # seconds
 _scan_cache: Dict[str, Any] = {"ts": 0.0, "pairs": []}
@@ -714,30 +742,13 @@ dp = Dispatcher()
 @dp.message(Command("start"))
 async def start_handler(m: Message):
     if get_user_key(m.from_user.id):
-        await m.answer(
-            "✅ Access confirmed.\n\n"
-            "Commands:\n"
-            "/scan — scan new memes (Birdeye)\n"
-            "/token <mint> — show token card\n"
-            "/my — my access status\n"
-            "/logout — unlink key\n"
-            "/help — show help"
-        )
+        await m.answer(STR["start"].format(product=PRODUCT))
     else:
         await m.answer("🔑 Please enter your access key:")
 
 @dp.message(Command("help"))
 async def help_handler(m: Message):
-    await m.answer(
-        "🤖 *CrocBrains Meme Scanner*\n"
-        "The meme that thinks for you.\n\n"
-        "• /scan — latest Solana pairs (Birdeye only)\n"
-        "• /token <mint> — price, MC, liquidity, volume, exchanges\n"
-        "• Holders & LP Lock appear automatically after data plan upgrade\n"
-        "• On-chain: Mint/Freeze authority, Top-10 holders (Helius)\n"
-        "• /my, /logout — manage access",
-        parse_mode="Markdown"
-    )
+    await m.answer(STR["help"])
 
 @dp.message(Command("my"))
 async def my_handler(m: Message):
@@ -757,7 +768,6 @@ async def logout_handler(m: Message):
     conn.close()
     await m.answer("🔒 Key unlinked. Send a new key or /start.")
 
-# ======= SHARED RENDER =======
 # ======= SHARED RENDER =======
 async def send_token_card(chat_id: int, mint: str):
     extra = None
@@ -801,34 +811,31 @@ async def send_token_card(chat_id: int, mint: str):
 async def scan_handler(m: Message):
     key = get_user_key(m.from_user.id)
     if not key:
-        await m.answer("⛔ No access. Please enter your key via /start.")
+        await m.answer(STR["no_access"])
         return
     ok, msg = is_key_valid_for_product(key)
     if not ok:
-        await m.answer(f"⛔ Access invalid: {msg}\nSend a new key.")
+        await m.answer(STR["access_invalid"].format(msg=msg))
         return
 
     now_ts = int(time.time())
     last_ts = get_last_scan_ts(m.from_user.id)
     remaining = SCAN_COOLDOWN_SEC - (now_ts - last_ts)
     if remaining > 0:
-        await m.answer(f"⏳ Please wait {remaining}s before using /scan again (anti-spam).")
+        await m.answer(STR["cooldown"].format(remaining=remaining))
         return
     set_last_scan_ts(m.from_user.id, now_ts)
 
     pairs = await fetch_latest_sol_pairs(limit=8)
     if not pairs:
-        await m.answer(
-            "😕 No fresh pairs available via Birdeye on the current plan.\n"
-            "Try `/token <mint>` or upgrade your data plan."
-        )
+        await m.answer(STR["no_pairs"])
         return
 
     # Показать прогресс для уже загруженных pairs
     n_pairs = len(pairs)
-    progress_msg = await m.answer(f"🔍 Scanning Solana pairs… (0/{n_pairs})")
+    progress_msg = await m.answer(STR["scan_progress"].format(i=0, n=n_pairs))
     for i in range(n_pairs):
-        await progress_msg.edit_text(f"🔍 Scanning Solana pairs… ({i + 1}/{n_pairs})")
+        await progress_msg.edit_text(STR["scan_progress"].format(i=i+1, n=n_pairs))
 
     # Теперь пары готовы — создаём сессию и выводим первую карточку
     _cleanup_scan_sessions()
