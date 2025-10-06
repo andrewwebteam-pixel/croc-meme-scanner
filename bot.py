@@ -824,14 +824,13 @@ async def scan_handler(m: Message):
         )
         return
 
-# Показать прогресс для уже загруженных pairs
-    n_pairs = len(pairs)
+        # Показать прогресс для уже загруженных pairs
+        n_pairs = len(pairs)
         progress_msg = await m.answer(f"🔍 Scanning Solana pairs… (0/{n_pairs})")
         for i in range(n_pairs):
-            # Можно добавить небольшой await asyncio.sleep(0) при желании, но это не обязательно
+            # Можно добавить небольшой await asyncio.sleep(0) при желании
             await progress_msg.edit_text(f"🔍 Scanning Solana pairs… ({i+1}/{n_pairs})")
-        # Теперь пары уже готовы, второй вызов fetch_latest_sol_pairs не нужен
-
+        # После цикла пары готовы, второй вызов fetch_latest_sol_pairs не нужен
 
     # Создаём сессию пагинации
     _cleanup_scan_sessions()
