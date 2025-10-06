@@ -39,7 +39,7 @@ _scan_cache: Dict[str, Any] = {"ts": 0.0, "pairs": []}
 
 
 # === /scan pagination sessions ===
-SCAN_SESSION_TTL = 300  # seconds
+SCAN_SESSION_TTL = 300  # время жизни сессии в секундах
 _scan_cache_sessions: Dict[str, Dict[str, Any]] = {}  # sid -> {"ts": float, "pairs": List[dict]}
 
 def _new_sid() -> str:
@@ -52,25 +52,23 @@ def _cleanup_scan_sessions():
             _scan_cache_sessions.pop(k, None)
 
 def scan_nav_kb(sid: str, idx: int, mint: str, mode: str = "summary") -> InlineKeyboardMarkup:
-    # Навигация
     prev_idx = max(idx - 1, 0)
     next_idx = idx + 1
     row_nav = [
         InlineKeyboardButton(text="◀ Prev", callback_data=f"scan:session:{sid}:idx:{prev_idx}"),
         InlineKeyboardButton(text="▶ Next", callback_data=f"scan:session:{sid}:idx:{next_idx}"),
     ]
-    # Тоггл summary/details
     row_toggle = (
         [InlineKeyboardButton(text="ℹ️ Details", callback_data=f"scan:session:{sid}:detail:{idx}")]
         if mode == "summary"
         else [InlineKeyboardButton(text="◀ Back", callback_data=f"scan:session:{sid}:idx:{idx}")]
     )
-    # Прямые ссылки
     be_link = f"https://birdeye.so/token/{mint}?chain=solana"
     solscan_link = f"https://solscan.io/token/{mint}"
     row_links1 = [InlineKeyboardButton(text="Open on Birdeye", url=be_link)]
     row_links2 = [InlineKeyboardButton(text="Open on Solscan", url=solscan_link)]
     return InlineKeyboardMarkup(inline_keyboard=[row_nav, row_toggle, row_links1, row_links2])
+
 
 
 # === Global API rate limiter ===
@@ -239,10 +237,14 @@ async def jupiter_price(session: aiohttp.ClientSession, mint: str) -> Optional[f
 
 # === Birdeye fetchers ===
 async def fetch_latest_sol_pairs(limit: int = 8) -> List[Dict[str, Any]]:
+    # cache hit
     if (_scan_cache["ts"] + SCAN_CACHE_TTL) > time.time() and _scan_cache["pairs"]:
         return _scan_cache["pairs"][:limit]
+
     if not BIRDEYE_API_KEY:
+        print("[SCAN] Birdeye: BIRDEYE_API_KEY is empty -> returning []")
         return []
+
     url = f"{BIRDEYE_BASE}/defi/markets"
     headers = {"accept": "application/json", "X-API-KEY": BIRDEYE_API_KEY}
     params = {"chain": "solana", "sort_by": "liquidity", "sort_type": "desc", "offset": 0, "limit": 50}
@@ -251,11 +253,21 @@ async def fetch_latest_sol_pairs(limit: int = 8) -> List[Dict[str, Any]]:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as s:
             async with s.get(url, headers=headers, params=params) as r:
                 if r.status != 200:
+                    try:
+                        txt = await r.text()
+                    except Exception:
+                        txt = "<no body>"
+                    print(f"[SCAN] /defi/markets HTTP {r.status} -> {txt[:300]}")
                     return []
                 j = await r.json()
                 if not j or not j.get("success"):
+                    print(f"[SCAN] /defi/markets success==false or empty: {str(j)[:300]}")
                     return []
                 data = j.get("data") or []
+                if not isinstance(data, list) or not data:
+                    print("[SCAN] /defi/markets returned empty 'data'")
+                    return []
+
                 pairs = []
                 for m in data:
                     try:
@@ -273,13 +285,17 @@ async def fetch_latest_sol_pairs(limit: int = 8) -> List[Dict[str, Any]]:
                             "pairCreatedAt": m.get("createdAt") or m.get("firstTradeAt"),
                             "chainId": "solana",
                         })
-                    except Exception:
+                    except Exception as e:
+                        print(f"[SCAN] pair build error: {e}")
                         continue
+
                 _scan_cache["ts"] = time.time()
                 _scan_cache["pairs"] = pairs
                 return pairs[:limit]
-    except Exception:
+    except Exception as e:
+        print(f"[SCAN] Birdeye fetch exception: {e}")
         return []
+
 
 async def birdeye_overview(session: aiohttp.ClientSession, mint: str) -> Optional[Dict[str, Any]]:
     if not BIRDEYE_API_KEY:
@@ -783,7 +799,6 @@ async def send_token_card(chat_id: int, mint: str):
 # ======= HANDLERS =======
 @dp.message(Command("scan"))
 async def scan_handler(m: Message):
-    # Доступ
     key = get_user_key(m.from_user.id)
     if not key:
         await m.answer("⛔ No access. Please enter your key via /start.")
@@ -791,6 +806,22 @@ async def scan_handler(m: Message):
     ok, msg = is_key_valid_for_product(key)
     if not ok:
         await m.answer(f"⛔ Access invalid: {msg}\nSend a new key.")
+        return
+
+    now_ts = int(time.time())
+    last_ts = get_last_scan_ts(m.from_user.id)
+    remaining = SCAN_COOLDOWN_SEC - (now_ts - last_ts)
+    if remaining > 0:
+        await m.answer(f"⏳ Please wait {remaining}s before using /scan again (anti-spam).")
+        return
+    set_last_scan_ts(m.from_user.id, now_ts)
+
+    pairs = await fetch_latest_sol_pairs(limit=8)
+    if not pairs:
+        await m.answer(
+            "😕 No fresh pairs available via Birdeye on the current plan.\n"
+            "Try `/token <mint>` or upgrade your data plan."
+        )
         return
 
     # Анти-спам /scan
