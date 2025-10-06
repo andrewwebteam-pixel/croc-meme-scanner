@@ -39,8 +39,8 @@ STR = {
     "access_invalid": "⛔ Access invalid: {msg}\nSend a new key.",
     "cooldown": "⏳ Please wait {remaining}s before using /scan again (anti-spam).",
     "no_pairs": (
-        "😕 No fresh pairs available via Birdeye on the current plan.\n"
-        "Try `/token <mint>` or upgrade your data plan."
+    "😕 No fresh pairs available via Birdeye on the current plan.\n"
+    "Try `/token <mint>` or upgrade your data plan."
     ),
     "scan_progress": "🔍 Scanning Solana pairs… ({i}/{n})",
     "start": "Welcome to the {product} bot! Use /help to see commands.",
@@ -59,8 +59,14 @@ STR = {
     "token_not_found": "⛔ Token not found. Please try again.",
     "bad_callback": "Bad callback.",
     "session_expired": "Session expired. Please run /scan again."
+    "enter_key": "Please enter your access key:",
+    "no_active_access": "⛔ No active access. Send your key or use /start.",
+    "key_unlinked": "✅ Key unlinked. Send a new key or /start.",
+    "usage_token": "Usage: `/token <mint | birdeye/solscan link | SYMBOL (MINT)>`",
+    "cant_detect_mint": "❌ Can't detect mint address. Send a Solana mint or a direct link to Birdeye/Solscan.",
+    "fetching_data": "Fetching token data…\n`{mint}`",
+    "no_data": "No data",
 }
-
 # === Simple in-memory cache for /scan results ===
 SCAN_CACHE_TTL = 15  # seconds
 _scan_cache: Dict[str, Any] = {"ts": 0.0, "pairs": []}
@@ -877,7 +883,7 @@ async def token_handler(m: Message):
 
     args = (m.text or "").split(maxsplit=1)
     if len(args) < 2:
-        await m.answer("Usage: `/token <mint | birdeye/solscan link | SYMBOL (MINT)>`", parse_mode="Markdown")
+        await m.answer(STR["usage_token"], parse_mode="Markdown")
         return
 
     raw_arg = args[1]
@@ -896,7 +902,7 @@ async def token_cb_handler(cb: CallbackQuery):
     try:
         _, mint, mode = cb.data.split(":", 2)
     except ValueError:
-        await cb.answer("Bad callback", show_alert=False)
+        await cb.answer(STR["bad_callback"])
         return
 
     extra = None
