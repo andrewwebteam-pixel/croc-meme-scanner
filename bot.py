@@ -744,7 +744,7 @@ async def start_handler(m: Message):
     if get_user_key(m.from_user.id):
         await m.answer(STR["start"].format(product=PRODUCT))
     else:
-        await m.answer("🔑 Please enter your access key:")
+        await m.answer(STR["enter_key"])
 
 @dp.message(Command("help"))
 async def help_handler(m: Message):
@@ -754,7 +754,7 @@ async def help_handler(m: Message):
 async def my_handler(m: Message):
     key = get_user_key(m.from_user.id)
     if not key:
-        await m.answer("⛔ No active access. Send your key or use /start.")
+        await m.answer(STR["no_active_access"])
         return
     ok, msg = is_key_valid_for_product(key)
     status = "✅ Active" if ok else "⛔ Inactive"
@@ -766,7 +766,7 @@ async def logout_handler(m: Message):
     conn.execute("DELETE FROM user_access WHERE user_id = ?", (m.from_user.id,))
     conn.commit()
     conn.close()
-    await m.answer("🔒 Key unlinked. Send a new key or /start.")
+    await m.answer(STR["key_unlinked"])
 
 # ======= SHARED RENDER =======
 async def send_token_card(chat_id: int, mint: str):
@@ -868,11 +868,11 @@ async def scan_handler(m: Message):
 async def token_handler(m: Message):
     key = get_user_key(m.from_user.id)
     if not key:
-        await m.answer("⛔ No access. Please enter your key via /start.")
+        await m.answer(STR["no_access"])
         return
     ok, msg = is_key_valid_for_product(key)
     if not ok:
-        await m.answer(f"⛔ Access invalid: {msg}\nSend a new key.")
+        await m.answer(STR["access_invalid"].format(msg=msg))
         return
 
     args = (m.text or "").split(maxsplit=1)
@@ -883,10 +883,10 @@ async def token_handler(m: Message):
     raw_arg = args[1]
     mint = normalize_mint_arg(raw_arg)
     if not mint:
-        await m.answer("❌ Can't detect mint address. Send a Solana mint or a direct link to Birdeye/Solscan.")
+        await m.answer(STR["cant_detect_mint"])
         return
 
-    await m.answer(f"🔎 Fetching token data…\n`{mint}`", parse_mode="Markdown")
+    await m.answer(STR["fetching_data"].format(mint=mint), parse_mode="Markdown")
     await send_token_card(m.chat.id, mint)
 
 # NEW: callback handler for “ℹ️ Details”
@@ -980,18 +980,18 @@ async def scan_cb_handler(cb: CallbackQuery):
         action = parts[3]
         idx = int(parts[4])
     except Exception:
-        await cb.answer("Bad callback")
+        await cb.answer(STR["bad_callback"])
         return
 
     _cleanup_scan_sessions()
     sess = _scan_cache_sessions.get(sid)
     if not sess:
-        await cb.answer("Session expired")
+        await cb.answer(STR["session_expired"])
         return
 
     pairs: List[Dict[str, Any]] = sess.get("pairs") or []
     if not pairs:
-        await cb.answer("No data")
+        await cb.answer(STR["no_data"])
         return
 
     # Нормализуем индекс
