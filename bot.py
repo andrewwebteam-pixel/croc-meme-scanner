@@ -39,8 +39,8 @@ STR = {
     "access_invalid": "⛔ Access invalid: {msg}\nSend a new key.",
     "cooldown": "⏳ Please wait {remaining}s before using /scan again (anti-spam).",
     "no_pairs": (
-    "😕 No fresh pairs available via Birdeye on the current plan.\n"
-    "Try `/token <mint>` or upgrade your data plan."
+        "😕 No fresh pairs available via Birdeye on the current plan.\n"
+        "Try `/token <mint>` or upgrade your data plan."
     ),
     "scan_progress": "🔍 Scanning Solana pairs… ({i}/{n})",
     "start": "Welcome to the {product} bot! Use /help to see commands.",
@@ -59,6 +59,7 @@ STR = {
     "token_not_found": "⛔ Token not found. Please try again.",
     "bad_callback": "Bad callback.",
     "session_expired": "Session expired. Please run /scan again.",
+    # Добавленные ключи:
     "enter_key": "Please enter your access key:",
     "no_active_access": "⛔ No active access. Send your key or use /start.",
     "key_unlinked": "✅ Key unlinked. Send a new key or /start.",
@@ -67,6 +68,7 @@ STR = {
     "fetching_data": "Fetching token data…\n`{mint}`",
     "no_data": "No data",
 }
+
 # === Simple in-memory cache for /scan results ===
 SCAN_CACHE_TTL = 15  # seconds
 _scan_cache: Dict[str, Any] = {"ts": 0.0, "pairs": []}
@@ -760,8 +762,8 @@ async def help_handler(m: Message):
 async def my_handler(m: Message):
     key = get_user_key(m.from_user.id)
     if not key:
-        await m.answer(STR["no_active_access"])
-        return
+    await m.answer(STR["no_active_access"])
+    return
     ok, msg = is_key_valid_for_product(key)
     status = "✅ Active" if ok else "⛔ Inactive"
     await m.answer(f"Your key: `{key}`\nStatus: {status}\n{msg}", parse_mode="Markdown")
@@ -892,7 +894,7 @@ async def token_handler(m: Message):
         await m.answer(STR["cant_detect_mint"])
         return
 
-    await m.answer(STR["fetching_data"].format(mint=mint), parse_mode="Markdown")
+    await m.answer(STR["fetching_data"].format(mint=mint), parse_mode="Markdown"))
     await send_token_card(m.chat.id, mint)
 
 # NEW: callback handler for “ℹ️ Details”
