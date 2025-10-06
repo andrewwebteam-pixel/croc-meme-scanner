@@ -37,6 +37,42 @@ BIRDEYE_BASE = "https://public-api.birdeye.so"
 SCAN_CACHE_TTL = 15  # seconds
 _scan_cache: Dict[str, Any] = {"ts": 0.0, "pairs": []}
 
+
+# === /scan pagination sessions ===
+SCAN_SESSION_TTL = 300  # seconds
+_scan_cache_sessions: Dict[str, Dict[str, Any]] = {}  # sid -> {"ts": float, "pairs": List[dict]}
+
+def _new_sid() -> str:
+    return str(int(time.time()*1000)) + "-" + os.urandom(3).hex()
+
+def _cleanup_scan_sessions():
+    now = time.time()
+    for k in list(_scan_cache_sessions.keys()):
+        if _scan_cache_sessions[k].get("ts", 0) + SCAN_SESSION_TTL < now:
+            _scan_cache_sessions.pop(k, None)
+
+def scan_nav_kb(sid: str, idx: int, mint: str, mode: str = "summary") -> InlineKeyboardMarkup:
+    # Навигация
+    prev_idx = max(idx - 1, 0)
+    next_idx = idx + 1
+    row_nav = [
+        InlineKeyboardButton(text="◀ Prev", callback_data=f"scan:session:{sid}:idx:{prev_idx}"),
+        InlineKeyboardButton(text="▶ Next", callback_data=f"scan:session:{sid}:idx:{next_idx}"),
+    ]
+    # Тоггл summary/details
+    row_toggle = (
+        [InlineKeyboardButton(text="ℹ️ Details", callback_data=f"scan:session:{sid}:detail:{idx}")]
+        if mode == "summary"
+        else [InlineKeyboardButton(text="◀ Back", callback_data=f"scan:session:{sid}:idx:{idx}")]
+    )
+    # Прямые ссылки
+    be_link = f"https://birdeye.so/token/{mint}?chain=solana"
+    solscan_link = f"https://solscan.io/token/{mint}"
+    row_links1 = [InlineKeyboardButton(text="Open on Birdeye", url=be_link)]
+    row_links2 = [InlineKeyboardButton(text="Open on Solscan", url=solscan_link)]
+    return InlineKeyboardMarkup(inline_keyboard=[row_nav, row_toggle, row_links1, row_links2])
+
+
 # === Global API rate limiter ===
 _last_api_call_ts = 0.0
 _api_lock = asyncio.Lock()
@@ -747,6 +783,7 @@ async def send_token_card(chat_id: int, mint: str):
 # ======= HANDLERS =======
 @dp.message(Command("scan"))
 async def scan_handler(m: Message):
+    # Доступ
     key = get_user_key(m.from_user.id)
     if not key:
         await m.answer("⛔ No access. Please enter your key via /start.")
@@ -756,7 +793,7 @@ async def scan_handler(m: Message):
         await m.answer(f"⛔ Access invalid: {msg}\nSend a new key.")
         return
 
-    # Per-user cooldown
+    # Анти-спам /scan
     now_ts = int(time.time())
     last_ts = get_last_scan_ts(m.from_user.id)
     remaining = SCAN_COOLDOWN_SEC - (now_ts - last_ts)
@@ -766,6 +803,8 @@ async def scan_handler(m: Message):
     set_last_scan_ts(m.from_user.id, now_ts)
 
     progress_msg = await m.answer("🔎 Scanning Solana pairs (Birdeye)…")
+
+    # Загружаем пары (из кэша Birdeye)
     pairs = await fetch_latest_sol_pairs(limit=8)
     if not pairs:
         await progress_msg.edit_text(
@@ -776,35 +815,44 @@ async def scan_handler(m: Message):
         )
         return
 
+    # Создаём сессию пагинации
+    _cleanup_scan_sessions()
+    sid = _new_sid()
+    _scan_cache_sessions[sid] = {"ts": time.time(), "pairs": pairs}
+
+    # Рендерим нулевой индекс (summary) и одну карточку с навигацией
+    first_idx = 0
+    p0 = pairs[first_idx]
+    mint0 = (p0.get("baseToken") or {}).get("address", "")
+
+    extra0 = None
     async with aiohttp.ClientSession() as session:
-        total = len(pairs)
-        for idx, p in enumerate(pairs, start=1):
-            mint = (p.get("baseToken") or {}).get("address", "")
-            extra = None
-            if BIRDEYE_API_KEY and mint:
-                extra = await birdeye_overview(session, mint)
-
-            if (p.get("priceUsd") is None) and mint:
-                jp = await jupiter_price(session, mint)
-                if jp is not None:
-                    p["priceUsd"] = jp
-
-            text = token_card(p, extra, extra_flags=None)
-            kb = token_keyboard(p)
+        if BIRDEYE_API_KEY and mint0:
             try:
-                await m.answer(text, reply_markup=kb, disable_web_page_preview=True)
+                extra0 = await birdeye_overview(session, mint0)
             except Exception:
-                await m.answer(text, disable_web_page_preview=True)
-
+                extra0 = None
+        if (p0.get("priceUsd") is None) and mint0:
             try:
-                await progress_msg.edit_text(f"🔎 Scanning Solana pairs (Birdeye)… ({idx}/{total})")
+                jp = await jupiter_price(session, mint0)
+                if jp is not None:
+                    p0["priceUsd"] = jp
             except Exception:
                 pass
 
+    text0 = token_card(p0, extra0, extra_flags=None)
+    kb0 = scan_nav_kb(sid, first_idx, mint0, mode="summary")
+
+    try:
+        await progress_msg.edit_text(text0, reply_markup=kb0, disable_web_page_preview=True)
+    except Exception:
+        # если прогресс нельзя редактировать, отправим новое сообщение
+        await m.answer(text0, reply_markup=kb0, disable_web_page_preview=True)
         try:
-            await progress_msg.edit_text("✅ Scan complete.")
+            await progress_msg.delete()
         except Exception:
             pass
+
 
 @dp.message(Command("token"))
 async def token_handler(m: Message):
@@ -833,13 +881,259 @@ async def token_handler(m: Message):
 
 # NEW: callback handler for “ℹ️ Details”
 @dp.callback_query(F.data.startswith("token:"))
-async def token_callback_handler(c: CallbackQuery):
-    # data: token:<mint>:details | token:<mint>:summary
+async def token_cb_handler(cb: CallbackQuery):
+    # Ожидаем формат: token:<mint>:<mode>, где <mode> in {"summary","details"}
     try:
-        _, mint, mode = c.data.split(":")
-    except Exception:
-        await c.answer("Bad callback")
+        _, mint, mode = cb.data.split(":", 2)
+    except ValueError:
+        await cb.answer("Bad callback", show_alert=False)
         return
+
+    extra = None
+    mkts = None
+    helius_info = None
+    topk_share = None
+
+    # Загружаем данные (Birdeye soft; Helius только в режиме details)
+    async with aiohttp.ClientSession() as session:
+        if BIRDEYE_API_KEY and mint:
+            try:
+                extra = await birdeye_overview(session, mint)
+            except Exception:
+                extra = None
+            try:
+                mkts = await birdeye_markets(session, mint)
+            except Exception:
+                mkts = None
+
+        # Сбор псевдопары для рендера
+        p = {
+            "baseToken": {
+                "symbol": (extra or {}).get("symbol") or "",
+                "name": (extra or {}).get("name") or "",
+                "address": mint
+            },
+            "priceUsd": (extra or {}).get("price"),
+            "liquidity": {"usd": (extra or {}).get("liquidity")},
+            "fdv": (extra or {}).get("marketCap"),
+            "volume": {"h24": (extra or {}).get("v24")},
+            "pairCreatedAt": (extra or {}).get("createdAt") or (extra or {}).get("firstTradeAt"),
+            "chainId": "solana",
+        }
+
+        # Фоллбек цены через Jupiter
+        if p.get("priceUsd") is None and mint:
+            try:
+                jp = await jupiter_price(session, mint)
+                if jp is not None:
+                    p["priceUsd"] = jp
+            except Exception:
+                pass
+
+        if mode == "details":
+            try:
+                helius_info = await helius_get_mint_info(session, mint)
+            except Exception:
+                helius_info = None
+            try:
+                topk_share = await helius_top_holders_share(session, mint, k=10)
+            except Exception:
+                topk_share = None
+
+    # Сбор текста и клавиатуры
+    try:
+        if mode == "details":
+            text = build_details_text(p, extra, mkts, helius_info, topk_share)
+            kb = token_keyboard(p, mode="details")
+        else:
+            text = build_summary_text(p, extra, mkts)
+            kb = token_keyboard(p, mode="summary")
+
+        await cb.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+    except Exception:
+        # На случай, если текст не изменился или сообщение устарело
+        pass
+
+    await cb.answer()
+
+
+# === /scan pagination & details callback ===
+@dp.callback_query(F.data.startswith("scan:session:"))
+async def scan_cb_handler(cb: CallbackQuery):
+    # Форматы:
+    #  scan:session:<sid>:idx:<i>
+    #  scan:session:<sid>:detail:<i>
+    parts = cb.data.split(":")
+    if len(parts) < 5:
+        await cb.answer("Bad callback", show_alert=False)
+        return
+
+    # Разбор
+    # parts: ["scan", "session", sid, action, idx]
+    sid = parts[2]
+    action = parts[3]
+    try:
+        idx = int(parts[4])
+    except Exception:
+        await cb.answer("Bad index", show_alert=False)
+        return
+
+    # Достаём сессию
+    sess = _scan_cache_sessions.get(sid)
+    if not sess or "pairs" not in sess:
+        await cb.answer("Session expired", show_alert=False)
+        return
+
+    pairs = sess["pairs"] or []
+    if not pairs:
+        await cb.answer("No data", show_alert=False)
+        return
+
+    # Нормализуем индекс
+    idx = max(0, min(idx, len(pairs) - 1))
+    p = pairs[idx]
+    mint = (p.get("baseToken") or {}).get("address", "") or ""
+
+    extra = None
+    mkts = None
+    helius_info = None
+    topk_share = None
+
+    # Загружаем данные для нужного режима
+    async with aiohttp.ClientSession() as session:
+        if BIRDEYE_API_KEY and mint:
+            try:
+                extra = await birdeye_overview(session, mint)
+            except Exception:
+                extra = None
+            try:
+                mkts = await birdeye_markets(session, mint)
+            except Exception:
+                mkts = None
+
+        # Фоллбек цены через Jupiter
+        if (p.get("priceUsd") is None) and mint:
+            try:
+                jp = await jupiter_price(session, mint)
+                if jp is not None:
+                    p["priceUsd"] = jp
+            except Exception:
+                pass
+
+        if action == "detail":
+            try:
+                helius_info = await helius_get_mint_info(session, mint)
+            except Exception:
+                helius_info = None
+            try:
+                topk_share = await helius_top_holders_share(session, mint, k=10)
+            except Exception:
+                topk_share = None
+
+    # Режимы summary/details
+    if action == "detail":
+        text = build_details_text(p, extra, mkts, helius_info, topk_share)
+        kb = scan_nav_kb(sid, idx, mint, mode="details")
+    else:
+        text = build_summary_text(p, extra, mkts)
+        kb = scan_nav_kb(sid, idx, mint, mode="summary")
+
+    try:
+        await cb.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+    except Exception:
+        pass
+
+    await cb.answer()
+
+
+    # Неподдержанное действие — просто уберём крутилку
+    await cb.answer()
+
+
+@dp.callback_query(F.data.startswith("scan:session:"))
+async def scan_cb_handler(cb: CallbackQuery):
+    # Форматы:
+    # scan:session:<sid>:idx:<i>
+    # scan:session:<sid>:detail:<i>
+    try:
+        parts = cb.data.split(":")
+        # ["scan","session", sid, "idx"|"detail", i]
+        sid = parts[2]
+        action = parts[3]
+        idx = int(parts[4])
+    except Exception:
+        await cb.answer("Bad callback")
+        return
+
+    _cleanup_scan_sessions()
+    sess = _scan_cache_sessions.get(sid)
+    if not sess:
+        await cb.answer("Session expired")
+        return
+
+    pairs: List[Dict[str, Any]] = sess.get("pairs") or []
+    if not pairs:
+        await cb.answer("No data")
+        return
+
+    # Нормализуем индекс
+    if idx < 0: idx = 0
+    if idx >= len(pairs): idx = len(pairs) - 1
+
+    p = pairs[idx]
+    mint = (p.get("baseToken") or {}).get("address", "")
+
+    text = None
+    kb = None
+
+    async with aiohttp.ClientSession() as session:
+        # Минимальные данные для summary (overview + цена)
+        extra = None
+        if BIRDEYE_API_KEY and mint:
+            try:
+                extra = await birdeye_overview(session, mint)
+            except Exception:
+                extra = None
+        if (p.get("priceUsd") is None) and mint:
+            try:
+                jp = await jupiter_price(session, mint)
+                if jp is not None:
+                    p["priceUsd"] = jp
+            except Exception:
+                pass
+
+        if action == "detail":
+            # Полные детали (DEX + ончейн + флаги риска)
+            mkts = None
+            if BIRDEYE_API_KEY and mint:
+                try:
+                    mkts = await birdeye_markets(session, mint)
+                except Exception:
+                    mkts = None
+            helius_info = None
+            topk_share = None
+            if HELIUS_RPC_URL and mint:
+                try:
+                    helius_info, topk_share = await asyncio.gather(
+                        helius_get_mint_info(session, mint),
+                        helius_top_holders_share(session, mint),
+                    )
+                except Exception:
+                    helius_info, topk_share = None, None
+            text = build_details_text(p, extra, mkts, helius_info, topk_share)
+            kb = scan_nav_kb(sid, idx, mint, mode="details")
+        else:
+            # Перелистывание (summary)
+            text = build_summary_text(p, extra, mkts=None)
+            kb = scan_nav_kb(sid, idx, mint, mode="summary")
+
+    try:
+        await cb.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+    except Exception:
+        await cb.message.answer(text, reply_markup=kb, disable_web_page_preview=True)
+
+    await cb.answer()
+
 
     extra = None
     mkts = None
