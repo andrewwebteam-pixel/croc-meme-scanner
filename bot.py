@@ -668,6 +668,7 @@ def token_keyboard(p: Dict[str, Any], mode: str = "summary") -> InlineKeyboardMa
         first_row,
         [InlineKeyboardButton(text="Open on Birdeye", url=be_link)],
         [InlineKeyboardButton(text="Open on Solscan", url=solscan_link)],
+        [InlineKeyboardButton(text="⭐ Add to favorites", callback_data=f"fav:add:{mint}")],
         [InlineKeyboardButton(text="Share", switch_inline_query=mint)],
     ])
 
@@ -1117,6 +1118,24 @@ async def scan_cb_handler(cb: CallbackQuery):
         await cb.message.answer(text, reply_markup=kb, disable_web_page_preview=True)
 
     await cb.answer()
+
+@dp.callback_query(F.data.startswith("fav:add:"))
+async def fav_add_callback(cb: CallbackQuery):
+    parts = cb.data.split(":")
+    if len(parts) < 3:
+        await cb.answer(STR["bad_callback"])
+        return
+    mint = parts[2]
+    user_id = cb.from_user.id
+
+    # проверяем, что у пользователя есть доступ (можно использовать get_user_key)
+    if not get_user_key(user_id):
+        await cb.answer(STR["no_active_access"])
+        return
+
+    # добавляем токен в избранное
+    add_favorite(user_id, mint)
+    await cb.answer(f"Added to favorites: {mint}")
 
 @dp.message(F.text)
 async def key_input_handler(m: Message):
