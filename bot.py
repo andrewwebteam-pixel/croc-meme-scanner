@@ -824,18 +824,14 @@ async def scan_handler(m: Message):
         )
         return
 
-    progress_msg = await m.answer("🔎 Scanning Solana pairs (Birdeye)…")
+# Показать прогресс для уже загруженных pairs
+    n_pairs = len(pairs)
+        progress_msg = await m.answer(f"🔍 Scanning Solana pairs… (0/{n_pairs})")
+        for i in range(n_pairs):
+            # Можно добавить небольшой await asyncio.sleep(0) при желании, но это не обязательно
+            await progress_msg.edit_text(f"🔍 Scanning Solana pairs… ({i+1}/{n_pairs})")
+        # Теперь пары уже готовы, второй вызов fetch_latest_sol_pairs не нужен
 
-    # Загружаем пары (из кэша Birdeye)
-    pairs = await fetch_latest_sol_pairs(limit=8)
-    if not pairs:
-        await progress_msg.edit_text(
-            "😕 No fresh pairs available via Birdeye on the current plan.\n"
-            "• Try `/token <mint>` to view a specific coin\n"
-            "• Or upgrade data plan to enable full auto-scan",
-            parse_mode="Markdown"
-        )
-        return
 
     # Создаём сессию пагинации
     _cleanup_scan_sessions()
