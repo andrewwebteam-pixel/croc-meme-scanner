@@ -824,15 +824,6 @@ async def scan_handler(m: Message):
         )
         return
 
-    # Анти-спам /scan
-    now_ts = int(time.time())
-    last_ts = get_last_scan_ts(m.from_user.id)
-    remaining = SCAN_COOLDOWN_SEC - (now_ts - last_ts)
-    if remaining > 0:
-        await m.answer(f"⏳ Please wait {remaining}s before using /scan again (anti-spam).")
-        return
-    set_last_scan_ts(m.from_user.id, now_ts)
-
     progress_msg = await m.answer("🔎 Scanning Solana pairs (Birdeye)…")
 
     # Загружаем пары (из кэша Birdeye)
