@@ -142,7 +142,6 @@ def db():
             last_scan_ts INTEGER NOT NULL
         )
     """)
-    with sqlite3.connect(DB_PATH) as conn:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS favorites (
             user_id INTEGER NOT NULL,
@@ -195,6 +194,23 @@ def is_key_valid_for_product(access_key: str) -> tuple[bool, str]:
             return False, "Key has expired."
     except Exception:
         return False, "Invalid key expiry format."
+
+def add_favorite(user_id: int, mint: str):
+    """Сохраняет токен в список избранного для пользователя."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO favorites(user_id, mint) VALUES (?, ?)",
+            (user_id, mint),
+        )
+
+def list_favorites(user_id: int) -> list[str]:
+    """Возвращает список адресов из избранного пользователя."""
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT mint FROM favorites WHERE user_id = ?",
+            (user_id,),
+        ).fetchall()
+    return [row[0] for row in rows]
 
 # === Throttle helpers ===
 def get_last_scan_ts(user_id: int) -> int:
@@ -903,6 +919,41 @@ async def token_handler(m: Message):
 
     await m.answer(STR["fetching_data"].format(mint=mint), parse_mode="Markdown")
     await send_token_card(m.chat.id, mint)
+
+@dp.message(Command("fav"))
+async def fav_handler(m: Message):
+    """Управление списком избранных токенов."""
+    key = get_user_key(m.from_user.id)
+    # проверяем доступ
+    if not key:
+        await m.answer(STR["no_active_access"])
+        return
+
+    # разбираем подкоманду
+    parts = m.text.strip().split()
+    if len(parts) < 2:
+        await m.answer("Usage: /fav add <mint> or /fav list")
+        return
+
+    action = parts[1].lower()
+    if action == "add":
+        # ожидаем mint как третий аргумент
+        if len(parts) < 3:
+            await m.answer("Usage: /fav add <mint>")
+            return
+        mint = parts[2]
+        add_favorite(m.from_user.id, mint)
+        await m.answer(f"✅ {mint} added to favorites.")
+    elif action == "list":
+        favs = list_favorites(m.from_user.id)
+        if not favs:
+            await m.answer("Your favorites list is empty.")
+        else:
+            msg = "⭐ Your favorites:\n" + "\n".join(favs)
+            await m.answer(msg)
+    else:
+        await m.answer("Unknown subcommand. Use /fav add <mint> or /fav list")
+
 
 # NEW: callback handler for “ℹ️ Details”
 @dp.callback_query(F.data.startswith("token:"))
