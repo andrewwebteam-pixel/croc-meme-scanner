@@ -824,11 +824,12 @@ async def scan_handler(m: Message):
         )
         return
 
-# Показать прогресс для уже загруженных pairs
+    # Показать прогресс для уже загруженных pairs
     n_pairs = len(pairs)
     progress_msg = await m.answer(f"🔍 Scanning Solana pairs… (0/{n_pairs})")
     for i in range(n_pairs):
-        await progress_msg.edit_text(f"🔍 Scanning Solana pairs… ({i+1}/{n_pairs})")
+        await progress_msg.edit_text(f"🔍 Scanning Solana pairs… ({i + 1}/{n_pairs})")
+
     # Теперь пары готовы — создаём сессию и выводим первую карточку
     _cleanup_scan_sessions()
     sid = _new_sid()
@@ -850,16 +851,10 @@ async def scan_handler(m: Message):
                     p0["priceUsd"] = jp
             except Exception:
                 pass
+
     text0 = token_card(p0, extra0, extra_flags=None)
     kb0 = scan_nav_kb(sid, first_idx, mint0, mode="summary")
     await progress_msg.edit_text(text0, reply_markup=kb0, disable_web_page_preview=True)
-    
-    except Exception:
-        await m.answer(text0, reply_markup=kb0, disable_web_page_preview=True)
-        try:
-            await progress_msg.delete()
-        except Exception:
-            pass
 
 
 @dp.message(Command("token"))
