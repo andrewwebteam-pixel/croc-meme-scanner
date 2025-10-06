@@ -817,18 +817,19 @@ async def scan_handler(m: Message):
     set_last_scan_ts(m.from_user.id, now_ts)
 
     pairs = await fetch_latest_sol_pairs(limit=8)
-if not pairs:
-    await m.answer(
-        "😕 No fresh pairs available via Birdeye on the current plan.\n"
-        "Try `/token <mint>` or upgrade your data plan."
-    )
-    return
+    if not pairs:
+        await m.answer(
+            "😕 No fresh pairs available via Birdeye on the current plan.\n"
+            "Try `/token <mint>` or upgrade your data plan."
+        )
+        return
 
 # Показать прогресс для уже загруженных pairs
-n_pairs = len(pairs)
-progress_msg = await m.answer(f"🔍 Scanning Solana pairs… (0/{n_pairs})")
-for i in range(n_pairs):
-    await progress_msg.edit_text(f"🔍 Scanning Solana pairs… ({i+1}/{n_pairs})")
+    n_pairs = len(pairs)
+    progress_msg = await m.answer(f"🔍 Scanning Solana pairs… (0/{n_pairs})")
+    for i in range(n_pairs):
+        await progress_msg.edit_text(f"🔍 Scanning Solana pairs… ({i+1}/{n_pairs})")
+    # Теперь пары готовы — создаём сессию и выводим первую карточку
     _cleanup_scan_sessions()
     sid = _new_sid()
     _scan_cache_sessions[sid] = {"ts": time.time(), "pairs": pairs}
@@ -851,8 +852,7 @@ for i in range(n_pairs):
                 pass
     text0 = token_card(p0, extra0, extra_flags=None)
     kb0 = scan_nav_kb(sid, first_idx, mint0, mode="summary")
-    try:
-        await progress_msg.edit_text(text0, reply_markup=kb0, disable_web_page_preview=True)
+    await progress_msg.edit_text(text0, reply_markup=kb0, disable_web_page_preview=True)
     except Exception:
         await m.answer(text0, reply_markup=kb0, disable_web_page_preview=True)
         try:
