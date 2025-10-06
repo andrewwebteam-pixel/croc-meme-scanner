@@ -853,6 +853,7 @@ async def scan_handler(m: Message):
     text0 = token_card(p0, extra0, extra_flags=None)
     kb0 = scan_nav_kb(sid, first_idx, mint0, mode="summary")
     await progress_msg.edit_text(text0, reply_markup=kb0, disable_web_page_preview=True)
+    
     except Exception:
         await m.answer(text0, reply_markup=kb0, disable_web_page_preview=True)
         try:
