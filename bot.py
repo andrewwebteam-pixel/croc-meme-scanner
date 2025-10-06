@@ -142,6 +142,14 @@ def db():
             last_scan_ts INTEGER NOT NULL
         )
     """)
+    with sqlite3.connect(DB_PATH) as conn:
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS favorites (
+            user_id INTEGER NOT NULL,
+            mint TEXT NOT NULL,
+            PRIMARY KEY (user_id, mint)
+        );
+    """)
     return conn
 
 def seed_initial_keys():
@@ -644,6 +652,7 @@ def token_keyboard(p: Dict[str, Any], mode: str = "summary") -> InlineKeyboardMa
         first_row,
         [InlineKeyboardButton(text="Open on Birdeye", url=be_link)],
         [InlineKeyboardButton(text="Open on Solscan", url=solscan_link)],
+        [InlineKeyboardButton(text="Share", switch_inline_query=mint)],
     ])
 
 
