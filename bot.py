@@ -823,25 +823,17 @@ async def scan_handler(m: Message):
             "Try `/token <mint>` or upgrade your data plan."
         )
         return
-
         # Показать прогресс для уже загруженных pairs
         n_pairs = len(pairs)
         progress_msg = await m.answer(f"🔍 Scanning Solana pairs… (0/{n_pairs})")
         for i in range(n_pairs):
-            # Можно добавить небольшой await asyncio.sleep(0) при желании
             await progress_msg.edit_text(f"🔍 Scanning Solana pairs… ({i+1}/{n_pairs})")
-        # После цикла пары готовы, второй вызов fetch_latest_sol_pairs не нужен
-
-    # Создаём сессию пагинации
     _cleanup_scan_sessions()
     sid = _new_sid()
     _scan_cache_sessions[sid] = {"ts": time.time(), "pairs": pairs}
-
-    # Рендерим нулевой индекс (summary) и одну карточку с навигацией
     first_idx = 0
     p0 = pairs[first_idx]
     mint0 = (p0.get("baseToken") or {}).get("address", "")
-
     extra0 = None
     async with aiohttp.ClientSession() as session:
         if BIRDEYE_API_KEY and mint0:
@@ -856,14 +848,11 @@ async def scan_handler(m: Message):
                     p0["priceUsd"] = jp
             except Exception:
                 pass
-
     text0 = token_card(p0, extra0, extra_flags=None)
     kb0 = scan_nav_kb(sid, first_idx, mint0, mode="summary")
-
     try:
         await progress_msg.edit_text(text0, reply_markup=kb0, disable_web_page_preview=True)
     except Exception:
-        # если прогресс нельзя редактировать, отправим новое сообщение
         await m.answer(text0, reply_markup=kb0, disable_web_page_preview=True)
         try:
             await progress_msg.delete()
