@@ -83,8 +83,11 @@ STR = {
     "btn_birdeye": "Open on Birdeye",
     "btn_solscan": "Open on Solscan",
     "btn_buy": "Buy (Jupiter)",
+    "btn_chart": "📈 Chart",
     "btn_fav_add": "⭐ Add to favorites",
     "btn_share": "Share",
+    "info_fdv": "FDV (Fully Diluted Valuation) = token price × total supply. Shows potential market cap if all tokens were in circulation.",
+    "info_lp": "LP (Liquidity Pool) = funds locked in DEX pairs. Higher LP = easier to trade without slippage. Locked LP means devs can't rug pull.",
     "card_price": "Price: {price}",
     "card_liquidity": "Liquidity: {liq}",
     "card_fdv": "FDV/MC: {fdv}",
@@ -138,6 +141,11 @@ STR = {
     "alert_list_header": "🔔 Your alerts:\n{alerts}",
     "alert_invalid_price": "❌ Invalid price. Please use a number.",
     "no_pairs_all_sources": "😕 No fresh pairs available from any source.\nTry `/token <mint>` instead.",
+    "chain_current": "Current chain: {chain}",
+    "chain_set": "✅ Chain set to: {chain}",
+    "chain_invalid": "❌ Invalid chain. Use: sol, eth, or bsc",
+    "chain_usage": "Usage: `/chain <sol|eth|bsc>` or `/chain` to see current",
+    "chain_not_supported": "⚠️ {chain} support coming soon. Only Solana (sol) is currently available.\nUse `/chain sol` to switch back.",
 }
 
 def T(key: str, **kwargs) -> str:
@@ -151,6 +159,9 @@ _scan_cache: Dict[str, Any] = {"ts": 0.0, "pairs": []}
 SCAN_SESSION_TTL = 300
 _scan_cache_sessions: Dict[str, Dict[str, Any]] = {}
 
+TOKEN_SESSION_TTL = 600
+_token_sessions: Dict[str, Dict[str, Any]] = {}
+
 def _new_sid() -> str:
     return str(int(time.time()*1000)) + "-" + os.urandom(3).hex()
 
@@ -159,6 +170,12 @@ def _cleanup_scan_sessions():
     for k in list(_scan_cache_sessions.keys()):
         if _scan_cache_sessions[k].get("ts", 0) + SCAN_SESSION_TTL < now:
             _scan_cache_sessions.pop(k, None)
+
+def _cleanup_token_sessions():
+    now = time.time()
+    for k in list(_token_sessions.keys()):
+        if _token_sessions[k].get("ts", 0) + TOKEN_SESSION_TTL < now:
+            _token_sessions.pop(k, None)
 
 def scan_nav_kb(sid: str, idx: int, mint: str, mode: str = "summary") -> InlineKeyboardMarkup:
     prev_idx = max(idx - 1, 0)
@@ -268,6 +285,12 @@ def db():
             created_at INTEGER NOT NULL
         );
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_chain (
+            user_id INTEGER PRIMARY KEY,
+            chain TEXT NOT NULL DEFAULT 'sol'
+        );
+    """)
     return conn
 
 def seed_initial_keys():
@@ -355,6 +378,15 @@ def list_favorites(user_id: int) -> list[str]:
             (user_id,),
         ).fetchall()
     return [row[0] for row in rows]
+
+def get_user_chain(user_id: int) -> str:
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute("SELECT chain FROM user_chain WHERE user_id = ?", (user_id,)).fetchone()
+    return row[0] if row else "sol"
+
+def set_user_chain(user_id: int, chain: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("INSERT OR REPLACE INTO user_chain (user_id, chain) VALUES (?, ?)", (user_id, chain))
 
 def get_last_scan_ts(user_id: int) -> int:
     conn = db()
@@ -558,27 +590,33 @@ async def fetch_latest_sol_pairs(limit: int = 8) -> List[Dict[str, Any]]:
                 print(f"[SCAN] /defi/recently_added exception: {e}")
     
     if not pairs:
-        print("[SCAN] Trying external fallback: DexScreener")
+        print("[SCAN] Trying external fallback: GeckoTerminal")
         try:
             await api_rate_limit()
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as s:
-                async with s.get("https://api.dexscreener.com/latest/dex/tokens/solana") as r:
+                headers = {"Accept": "application/json"}
+                async with s.get("https://api.geckoterminal.com/api/v2/networks/solana/new_pools", headers=headers) as r:
                     if r.status == 200:
                         try:
                             j = await r.json()
-                            if j and isinstance(j.get("pairs"), list):
+                            if j and isinstance(j.get("data"), list):
                                 seen_mints = set()
-                                for pair in j["pairs"]:
+                                for pool_data in j["data"]:
                                     try:
-                                        base_token = pair.get("baseToken") or {}
+                                        pool = pool_data.get("attributes", {})
+                                        base_token = pool.get("base_token", {})
                                         mint = base_token.get("address", "")
                                         if not mint or mint in seen_mints:
                                             continue
                                         seen_mints.add(mint)
                                         
-                                        created_at = pair.get("pairCreatedAt")
-                                        if isinstance(created_at, (int, float)):
-                                            created_ts = int(created_at)
+                                        created_at = pool.get("pool_created_at")
+                                        if created_at:
+                                            from datetime import datetime
+                                            try:
+                                                created_ts = int(datetime.fromisoformat(created_at.replace('Z', '+00:00')).timestamp())
+                                            except:
+                                                created_ts = 0
                                         else:
                                             created_ts = 0
                                         
@@ -588,28 +626,28 @@ async def fetch_latest_sol_pairs(limit: int = 8) -> List[Dict[str, Any]]:
                                                 "name": base_token.get("name", ""),
                                                 "address": mint
                                             },
-                                            "priceUsd": float(pair.get("priceUsd", 0)) if pair.get("priceUsd") else None,
-                                            "liquidity": {"usd": float(pair.get("liquidity", {}).get("usd", 0)) if pair.get("liquidity") else None},
-                                            "fdv": float(pair.get("fdv", 0)) if pair.get("fdv") else None,
-                                            "volume": {"h24": float(pair.get("volume", {}).get("h24", 0)) if pair.get("volume") else None},
+                                            "priceUsd": float(pool.get("base_token_price_usd", 0)) if pool.get("base_token_price_usd") else None,
+                                            "liquidity": {"usd": float(pool.get("reserve_in_usd", 0)) if pool.get("reserve_in_usd") else None},
+                                            "fdv": float(pool.get("fdv_usd", 0)) if pool.get("fdv_usd") else None,
+                                            "volume": {"h24": float(pool.get("volume_usd", {}).get("h24", 0)) if pool.get("volume_usd") else None},
                                             "pairCreatedAt": created_ts,
                                             "chainId": "solana",
                                         })
                                     except Exception as e:
-                                        print(f"[SCAN] DexScreener pair error: {e}")
+                                        print(f"[SCAN] GeckoTerminal pool error: {e}")
                                         continue
                                 
                                 pairs.sort(key=lambda x: x.get("pairCreatedAt", 0), reverse=True)
                                 pairs = pairs[:8]
-                                print(f"[SCAN] DexScreener returned {len(pairs)} pairs")
+                                print(f"[SCAN] GeckoTerminal returned {len(pairs)} pairs")
                             else:
-                                print(f"[SCAN] DexScreener unexpected format: {str(j)[:200]}")
+                                print(f"[SCAN] GeckoTerminal unexpected format: {str(j)[:200]}")
                         except Exception as e:
-                            print(f"[SCAN] DexScreener parse error: {e}")
+                            print(f"[SCAN] GeckoTerminal parse error: {e}")
                     else:
-                        print(f"[SCAN] DexScreener HTTP {r.status}")
+                        print(f"[SCAN] GeckoTerminal HTTP {r.status}")
         except Exception as e:
-            print(f"[SCAN] DexScreener exception: {e}")
+            print(f"[SCAN] GeckoTerminal exception: {e}")
     
     if pairs:
         _scan_cache["ts"] = time.time()
@@ -1139,22 +1177,31 @@ def token_keyboard(p: Dict[str, Any], mode: str = "summary") -> InlineKeyboardMa
         if mode == "summary"
         else [InlineKeyboardButton(text=T("btn_back"), callback_data=f"token:{mint}:summary")]
     )
+    
     be_link = f"https://birdeye.so/token/{mint}?chain=solana"
     solscan_link = f"https://solscan.io/token/{mint}"
     jup_link = f"https://jup.ag/swap?outputMint={mint}"
+    chart_link = f"https://dexscreener.com/solana/{mint}"
 
-    row_birdeye = [InlineKeyboardButton(text=T("btn_birdeye"), url=be_link)]
-    row_solscan_buy = [
-        InlineKeyboardButton(text=T("btn_solscan"), url=solscan_link),
+    row_buy_chart = [
         InlineKeyboardButton(text=T("btn_buy"), url=jup_link),
+        InlineKeyboardButton(text=T("btn_chart"), url=chart_link),
+    ]
+    row_explorers = [
+        InlineKeyboardButton(text=T("btn_birdeye"), url=be_link),
+        InlineKeyboardButton(text=T("btn_solscan"), url=solscan_link),
     ]
     row_actions = [
         InlineKeyboardButton(text=T("btn_fav_add"), callback_data=f"fav:add:{mint}"),
         InlineKeyboardButton(text=T("btn_share"), switch_inline_query=mint),
     ]
+    row_info = [
+        InlineKeyboardButton(text="ℹ️ About FDV", callback_data="info:fdv"),
+        InlineKeyboardButton(text="ℹ️ About LP", callback_data="info:lp"),
+    ]
 
     return InlineKeyboardMarkup(
-        inline_keyboard=[row_toggle, row_birdeye, row_solscan_buy, row_actions]
+        inline_keyboard=[row_toggle, row_buy_chart, row_explorers, row_actions, row_info]
     )
 
 async def helius_rpc(session: aiohttp.ClientSession, method: str, params: list) -> Optional[dict]:
@@ -1280,6 +1327,11 @@ async def scan_handler(m: Message):
         await m.answer(T("access_invalid", msg=msg), **MSG_KW)
         return
 
+    chain = get_user_chain(user_id)
+    if chain != "sol":
+        await m.answer(T("chain_not_supported", chain=chain), **MSG_KW)
+        return
+
     is_pro = is_pro_user(user_id)
     cooldown = SCAN_COOLDOWN_PRO_SEC if is_pro else SCAN_COOLDOWN_SEC
 
@@ -1349,6 +1401,11 @@ async def token_handler(m: Message):
         await m.answer(T("access_invalid", msg=msg), **MSG_KW)
         return
 
+    chain = get_user_chain(user_id)
+    if chain != "sol":
+        await m.answer(T("chain_not_supported", chain=chain), **MSG_KW)
+        return
+
     args = (m.text or "").split(maxsplit=1)
     if len(args) < 2:
         log_command(user_id, "/token", "", ok=False, err="usage")
@@ -1415,6 +1472,14 @@ async def token_handler(m: Message):
         log_command(user_id, "/token", mint, ok=False, ms=elapsed_ms, err="token_not_found")
         await status.edit_text(T("token_not_found"), **MSG_KW)
         return
+
+    _cleanup_token_sessions()
+    _token_sessions[mint] = {
+        "p": p,
+        "extra": extra,
+        "mkts": mkts,
+        "ts": time.time()
+    }
 
     text = build_summary_text(p, extra, mkts, is_pro)
     kb = token_keyboard(p, mode="summary")
@@ -1558,45 +1623,56 @@ async def token_callback_handler(cb: CallbackQuery):
     user_id = cb.from_user.id
     is_pro = is_pro_user(user_id)
 
-    extra = None
-    mkts = None
+    _cleanup_token_sessions()
+    sess = _token_sessions.get(mint)
+    
+    if sess:
+        p = sess.get("p", {})
+        extra = sess.get("extra")
+        mkts = sess.get("mkts")
+    else:
+        extra = None
+        mkts = None
+        async with aiohttp.ClientSession() as session:
+            if BIRDEYE_API_KEY and mint:
+                try:
+                    extra = await birdeye_overview(session, mint)
+                except Exception:
+                    extra = None
+                try:
+                    mkts = await birdeye_markets(session, mint)
+                except Exception:
+                    mkts = None
+            
+            if not extra:
+                extra = await dexscreener_token(session, mint)
+
+            p = {
+                "baseToken": {
+                    "symbol": (extra or {}).get("symbol") or "",
+                    "name": (extra or {}).get("name") or "",
+                    "address": mint
+                },
+                "priceUsd": (extra or {}).get("price"),
+                "liquidity": {"usd": (extra or {}).get("liquidity")},
+                "fdv": (extra or {}).get("mc") or (extra or {}).get("marketCap"),
+                "volume": {"h24": (extra or {}).get("v24hUSD") or (extra or {}).get("v24h")},
+                "pairCreatedAt": (extra or {}).get("createdAt") or (extra or {}).get("firstTradeAt"),
+                "chainId": "solana",
+            }
+
+            if p.get("priceUsd") is None and mint:
+                try:
+                    jp = await jupiter_price(session, mint)
+                    if jp is not None:
+                        p["priceUsd"] = jp
+                except Exception:
+                    pass
+
     helius_info = None
     topk_share = None
-
-    async with aiohttp.ClientSession() as session:
-        if BIRDEYE_API_KEY and mint:
-            try:
-                extra = await birdeye_overview(session, mint)
-            except Exception:
-                extra = None
-            try:
-                mkts = await birdeye_markets(session, mint)
-            except Exception:
-                mkts = None
-
-        p = {
-            "baseToken": {
-                "symbol": (extra or {}).get("symbol") or "",
-                "name": (extra or {}).get("name") or "",
-                "address": mint
-            },
-            "priceUsd": (extra or {}).get("price"),
-            "liquidity": {"usd": (extra or {}).get("liquidity")},
-            "fdv": (extra or {}).get("mc") or (extra or {}).get("marketCap"),
-            "volume": {"h24": (extra or {}).get("v24hUSD") or (extra or {}).get("v24h")},
-            "pairCreatedAt": (extra or {}).get("createdAt") or (extra or {}).get("firstTradeAt"),
-            "chainId": "solana",
-        }
-
-        if p.get("priceUsd") is None and mint:
-            try:
-                jp = await jupiter_price(session, mint)
-                if jp is not None:
-                    p["priceUsd"] = jp
-            except Exception:
-                pass
-
-        if mode == "details":
+    if mode == "details":
+        async with aiohttp.ClientSession() as session:
             try:
                 helius_info = await helius_get_mint_info(session, mint)
             except Exception:
@@ -1728,6 +1804,49 @@ async def fav_add_callback(cb: CallbackQuery):
     add_favorite(user_id, mint)
     log_command(user_id, "callback:fav:add", mint, ok=True)
     await cb.answer(T("fav_added_callback", mint=mint))
+
+@dp.callback_query(F.data.startswith("info:"))
+async def info_callback(cb: CallbackQuery):
+    if not cb.from_user:
+        return
+    parts = cb.data.split(":")
+    if len(parts) < 2:
+        await cb.answer(T("bad_callback"))
+        return
+    
+    info_type = parts[1]
+    if info_type == "fdv":
+        await cb.answer(T("info_fdv"), show_alert=True)
+    elif info_type == "lp":
+        await cb.answer(T("info_lp"), show_alert=True)
+    else:
+        await cb.answer(T("bad_callback"))
+
+@dp.message(Command("chain"))
+async def chain_handler(m: Message):
+    if not m.from_user:
+        return
+    user_id = m.from_user.id
+    key = get_user_key(user_id)
+    if not key:
+        await m.answer(T("no_access"), **MSG_KW)
+        return
+    
+    args = (m.text or "").split()
+    if len(args) < 2:
+        current = get_user_chain(user_id)
+        chain_names = {"sol": "Solana", "eth": "Ethereum", "bsc": "BSC"}
+        await m.answer(T("chain_current", chain=chain_names.get(current, current)), **MSG_KW)
+        return
+    
+    chain = args[1].lower()
+    if chain not in ["sol", "eth", "bsc"]:
+        await m.answer(T("chain_invalid"), **MSG_KW)
+        return
+    
+    set_user_chain(user_id, chain)
+    chain_names = {"sol": "Solana", "eth": "Ethereum", "bsc": "BSC"}
+    await m.answer(T("chain_set", chain=chain_names.get(chain, chain)), **MSG_KW)
 
 @dp.message(F.text)
 async def key_input_handler(m: Message):
