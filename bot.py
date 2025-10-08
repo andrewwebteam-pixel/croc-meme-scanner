@@ -88,7 +88,7 @@ STR = {
     "btn_back": "◀ Back",
     "btn_birdeye": "🐦 Birdeye",
     "btn_solscan": "🔍 Solscan",
-    "btn_buy": "💰 Buy",
+    "btn_buy": "💰 Trade",
     "btn_chart": "📈 Chart",
     "btn_fav_add": "⭐ Add to favorites",
     "btn_share": "📤 Share",
@@ -172,6 +172,7 @@ _awaiting_token_input: Dict[int, bool] = {}
 _awaiting_fav_add: Dict[int, bool] = {}
 _awaiting_fav_del: Dict[int, bool] = {}
 _awaiting_alert_set: Dict[int, Dict[str, Any]] = {}
+_awaiting_alert_del: Dict[int, bool] = {}
 
 def _new_sid() -> str:
     return str(int(time.time()*1000)) + "-" + os.urandom(3).hex()
@@ -193,8 +194,9 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🔍 Scan"), KeyboardButton(text="🎯 Find Token"), KeyboardButton(text="⭐ Add Fav")],
-            [KeyboardButton(text="📜 My Favs"), KeyboardButton(text="❌ Remove Fav"), KeyboardButton(text="🔔 Alerts")],
-            [KeyboardButton(text="🧾 My Tier"), KeyboardButton(text="❔ Help"), KeyboardButton(text="🚪 Logout")],
+            [KeyboardButton(text="📜 My Favs"), KeyboardButton(text="❌ Remove Fav"), KeyboardButton(text="🔔 Set Alert")],
+            [KeyboardButton(text="🔕 Remove Alert"), KeyboardButton(text="🧾 My Tier"), KeyboardButton(text="❔ Help")],
+            [KeyboardButton(text="🚪 Logout")],
         ],
         resize_keyboard=True,
         row_width=3
@@ -211,11 +213,10 @@ def scan_nav_kb(sid: str, idx: int, mint: str, user_id: int) -> InlineKeyboardMa
 
     be_link = f"https://birdeye.so/token/{mint}?chain=solana"
     solscan_link = f"https://solscan.io/token/{mint}"
-    jup_link = f"https://jup.ag/swap?outputMint={mint}"
     dex_link = f"https://dexscreener.com/solana/{mint}"
 
     row_buy_chart = [
-        InlineKeyboardButton(text=T("btn_buy"), url=jup_link),
+        InlineKeyboardButton(text=T("btn_buy"), url=dex_link),
         InlineKeyboardButton(text=T("btn_chart"), url=dex_link),
     ]
     row_links = [
@@ -531,7 +532,9 @@ async def fetch_latest_sol_pairs(limit: int = 8) -> List[Dict[str, Any]]:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
                 async with s.get(url_markets, headers=headers, params=params_markets) as r:
                     status = r.status
-                    if status == 403:
+                    if status == 401:
+                        print("[SCAN] /defi/v2/markets returned 401 (unauthorized) - falling back to recently_added")
+                    elif status == 403:
                         print("[SCAN] /defi/v2/markets returned 403 (plan limit) - falling back to recently_added")
                     elif status == 429:
                         print("[SCAN] /defi/v2/markets returned 429 (rate limit) - falling back to recently_added")
@@ -895,11 +898,15 @@ async def birdeye_markets(session: aiohttp.ClientSession, mint: str) -> Optional
 
 async def fetch_pair_data(session: aiohttp.ClientSession, mint: str) -> Optional[Dict[str, Any]]:
     """
-    Build basic pair dict using Birdeye if available, fallback to DexScreener.
+    Build basic pair dict with improved fallback strategy:
+    1. Try Birdeye overview (if API key available)
+    2. Try DexScreener search endpoint
+    3. Try DexScreener tokens/v1 endpoint
+    4. Try Jupiter price as last resort for price data
     Returns dict with: baseToken {symbol, name, address}, priceUsd, liquidity, fdv, volume, pairCreatedAt
     """
     overview = await birdeye_overview(session, mint) if BIRDEYE_API_KEY else None
-    if overview:
+    if overview and overview.get("price"):
         return {
             "baseToken": {
                 "symbol": overview.get("symbol", ""),
@@ -914,8 +921,9 @@ async def fetch_pair_data(session: aiohttp.ClientSession, mint: str) -> Optional
             "chainId": "solana",
         }
     
+    # Try DexScreener search
     dex_data = await dexscreener_token(session, mint)
-    if dex_data:
+    if dex_data and dex_data.get("price"):
         return {
             "baseToken": {
                 "symbol": dex_data.get("symbol", ""),
@@ -927,6 +935,52 @@ async def fetch_pair_data(session: aiohttp.ClientSession, mint: str) -> Optional
             "fdv": dex_data.get("fdv") or dex_data.get("marketCap"),
             "volume": {"h24": dex_data.get("v24hUSD")},
             "pairCreatedAt": dex_data.get("pairCreatedAt"),
+            "chainId": "solana",
+        }
+    
+    # Try alternative DexScreener endpoint
+    try:
+        await api_rate_limit(min_interval_sec=0.5)
+        url = f"https://api.dexscreener.com/tokens/v1/solana/{mint}"
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            if r.status == 200:
+                j = await r.json()
+                if j and isinstance(j.get("pairs"), list) and len(j["pairs"]) > 0:
+                    pair = j["pairs"][0]
+                    base_token = pair.get("baseToken", {})
+                    if pair.get("priceUsd"):
+                        return {
+                            "baseToken": {
+                                "symbol": base_token.get("symbol", ""),
+                                "name": base_token.get("name", ""),
+                                "address": mint
+                            },
+                            "priceUsd": float(pair.get("priceUsd", 0)) if pair.get("priceUsd") else None,
+                            "liquidity": {"usd": float(pair.get("liquidity", {}).get("usd", 0)) if pair.get("liquidity") else None},
+                            "fdv": float(pair.get("fdv", 0)) if pair.get("fdv") else None,
+                            "volume": {"h24": float(pair.get("volume", {}).get("h24", 0)) if pair.get("volume") else None},
+                            "pairCreatedAt": pair.get("pairCreatedAt"),
+                            "chainId": "solana",
+                        }
+    except Exception as e:
+        print(f"[FETCH_PAIR] DexScreener tokens/v1 error: {e}")
+    
+    # Last resort: try Jupiter for price only
+    jupiter_price_val = await jupiter_price(session, mint)
+    if jupiter_price_val:
+        symbol = overview.get("symbol", "") if overview else ""
+        name = overview.get("name", "") if overview else ""
+        return {
+            "baseToken": {
+                "symbol": symbol,
+                "name": name,
+                "address": mint
+            },
+            "priceUsd": jupiter_price_val,
+            "liquidity": {"usd": None},
+            "fdv": None,
+            "volume": {"h24": None},
+            "pairCreatedAt": None,
             "chainId": "solana",
         }
     
@@ -1428,12 +1482,11 @@ def token_keyboard(p: Dict[str, Any], user_id: Optional[int] = None) -> InlineKe
     
     be_link = f"https://birdeye.so/token/{mint}?chain=solana"
     solscan_link = f"https://solscan.io/token/{mint}"
-    jup_link = f"https://jup.ag/swap?outputMint={mint}"
-    chart_link = f"https://dexscreener.com/solana/{mint}"
+    dex_link = f"https://dexscreener.com/solana/{mint}"
 
     row_buy_chart = [
-        InlineKeyboardButton(text=T("btn_buy"), url=jup_link),
-        InlineKeyboardButton(text=T("btn_chart"), url=chart_link),
+        InlineKeyboardButton(text=T("btn_buy"), url=dex_link),
+        InlineKeyboardButton(text=T("btn_chart"), url=dex_link),
     ]
     row_explorers = [
         InlineKeyboardButton(text=T("btn_birdeye"), url=be_link),
@@ -1929,6 +1982,48 @@ async def alerts_handler(m: Message):
             await m.answer(T("awaiting_mint"), **MSG_KW)
             return
     
+    if sub == "del":
+        if len(args) >= 3:
+            mint = normalize_mint_arg(args[2])
+            if not mint:
+                await m.answer(T("cant_detect_mint"), **MSG_KW)
+                return
+            
+            conn = db()
+            cur = conn.execute("SELECT thresholds FROM alerts WHERE user_id = ?", (user_id,))
+            row = cur.fetchone()
+            
+            if not row or not row[0]:
+                await m.answer(f"❌ No alerts found for {mint[:8]}...", **MSG_KW)
+                conn.close()
+                return
+            
+            try:
+                thresholds = json.loads(row[0])
+            except Exception:
+                thresholds = {}
+            
+            if mint in thresholds:
+                del thresholds[mint]
+                if thresholds:
+                    conn.execute(
+                        "UPDATE alerts SET thresholds = ? WHERE user_id = ?",
+                        (json.dumps(thresholds), user_id)
+                    )
+                else:
+                    conn.execute("DELETE FROM alerts WHERE user_id = ?", (user_id,))
+                conn.commit()
+                await m.answer(f"✅ {mint} removed from alerts.", **MSG_KW)
+            else:
+                await m.answer(f"❌ No alert found for {mint[:8]}...", **MSG_KW)
+            
+            conn.close()
+            return
+        else:
+            _awaiting_alert_del[user_id] = True
+            await m.answer(T("awaiting_mint"), **MSG_KW)
+            return
+    
     await m.answer(T("alerts_soon"), **MSG_KW)
 
 @dp.callback_query(F.data.startswith("token:"))
@@ -2336,6 +2431,44 @@ async def text_input_handler(m: Message):
             await m.answer(T("alert_set_success", mint=mint[:8] + "...", price=price), **MSG_KW)
             return
     
+    if user_id in _awaiting_alert_del and _awaiting_alert_del[user_id]:
+        _awaiting_alert_del[user_id] = False
+        mint = normalize_mint_arg(text_input)
+        if not mint:
+            await m.answer(T("cant_detect_mint"), **MSG_KW)
+            return
+        
+        conn = db()
+        cur = conn.execute("SELECT thresholds FROM alerts WHERE user_id = ?", (user_id,))
+        row = cur.fetchone()
+        
+        if not row or not row[0]:
+            await m.answer(f"❌ No alerts found for {mint[:8]}...", **MSG_KW)
+            conn.close()
+            return
+        
+        try:
+            thresholds = json.loads(row[0])
+        except Exception:
+            thresholds = {}
+        
+        if mint in thresholds:
+            del thresholds[mint]
+            if thresholds:
+                conn.execute(
+                    "UPDATE alerts SET thresholds = ? WHERE user_id = ?",
+                    (json.dumps(thresholds), user_id)
+                )
+            else:
+                conn.execute("DELETE FROM alerts WHERE user_id = ?", (user_id,))
+            conn.commit()
+            await m.answer(f"✅ {mint} removed from alerts.", **MSG_KW)
+        else:
+            await m.answer(f"❌ No alert found for {mint[:8]}...", **MSG_KW)
+        
+        conn.close()
+        return
+    
     if user_id in _awaiting_token_input and _awaiting_token_input[user_id]:
         _awaiting_token_input[user_id] = False
         mint_arg = text_input
@@ -2400,8 +2533,13 @@ async def text_input_handler(m: Message):
         _awaiting_fav_del[user_id] = True
         await m.answer(T("awaiting_mint"), **MSG_KW)
         return
-    elif text_input == "🔔 Alerts":
-        await alerts_handler(m)
+    elif text_input == "🔔 Set Alert":
+        _awaiting_alert_set[user_id] = {"step": "mint"}
+        await m.answer(T("awaiting_mint"), **MSG_KW)
+        return
+    elif text_input == "🔕 Remove Alert":
+        _awaiting_alert_del[user_id] = True
+        await m.answer(T("awaiting_mint"), **MSG_KW)
         return
     elif text_input == "🧾 My Tier":
         await my_handler(m)
