@@ -86,12 +86,12 @@ STR = {
     "btn_next": "▶ Next",
     "btn_details": "ℹ️ Details",
     "btn_back": "◀ Back",
-    "btn_birdeye": "Open on Birdeye",
-    "btn_solscan": "Open on Solscan",
-    "btn_buy": "Buy (Jupiter)",
+    "btn_birdeye": "🐦 Birdeye",
+    "btn_solscan": "🔍 Solscan",
+    "btn_buy": "💰 Buy",
     "btn_chart": "📈 Chart",
     "btn_fav_add": "⭐ Add to favorites",
-    "btn_share": "Share",
+    "btn_share": "📤 Share",
     "info_fdv": "FDV (Fully Diluted Valuation) = token price × total supply. Shows potential market cap if all tokens were in circulation.",
     "info_lp": "LP (Liquidity Pool) = funds locked in DEX pairs. Higher LP = easier to trade without slippage. Locked LP means devs can't rug pull.",
     "card_price": "Price: {price}",
@@ -169,6 +169,9 @@ TOKEN_SESSION_TTL = 600
 _token_sessions: Dict[str, Dict[str, Any]] = {}
 
 _awaiting_token_input: Dict[int, bool] = {}
+_awaiting_fav_add: Dict[int, bool] = {}
+_awaiting_fav_del: Dict[int, bool] = {}
+_awaiting_alert_set: Dict[int, Dict[str, Any]] = {}
 
 def _new_sid() -> str:
     return str(int(time.time()*1000)) + "-" + os.urandom(3).hex()
@@ -186,15 +189,15 @@ def _cleanup_token_sessions():
             _token_sessions.pop(k, None)
 
 def main_menu_keyboard() -> ReplyKeyboardMarkup:
-    """Create the main menu ReplyKeyboardMarkup."""
+    """Create the main menu ReplyKeyboardMarkup with 3 columns and emojis."""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="/scan"), KeyboardButton(text="/token")],
-            [KeyboardButton(text="/fav add"), KeyboardButton(text="/fav list")],
-            [KeyboardButton(text="/fav del"), KeyboardButton(text="/alerts")],
-            [KeyboardButton(text="/my"), KeyboardButton(text="/logout")],
+            [KeyboardButton(text="🔍 Scan"), KeyboardButton(text="🎯 Find Token"), KeyboardButton(text="⭐ Add Fav")],
+            [KeyboardButton(text="📜 My Favs"), KeyboardButton(text="❌ Remove Fav"), KeyboardButton(text="🔔 Alerts")],
+            [KeyboardButton(text="🧾 My Tier"), KeyboardButton(text="❔ Help"), KeyboardButton(text="🚪 Logout")],
         ],
-        resize_keyboard=True
+        resize_keyboard=True,
+        row_width=3
     )
 
 def scan_nav_kb(sid: str, idx: int, mint: str, user_id: int) -> InlineKeyboardMarkup:
@@ -889,6 +892,65 @@ async def birdeye_markets(session: aiohttp.ClientSession, mint: str) -> Optional
     except Exception as e:
         print(f"[BIRDEYE] markets exception for {mint[:8]}...: {e}")
         return None
+
+async def fetch_pair_data(session: aiohttp.ClientSession, mint: str) -> Optional[Dict[str, Any]]:
+    """
+    Build basic pair dict using Birdeye if available, fallback to DexScreener.
+    Returns dict with: baseToken {symbol, name, address}, priceUsd, liquidity, fdv, volume, pairCreatedAt
+    """
+    overview = await birdeye_overview(session, mint) if BIRDEYE_API_KEY else None
+    if overview:
+        return {
+            "baseToken": {
+                "symbol": overview.get("symbol", ""),
+                "name": overview.get("name", ""),
+                "address": mint
+            },
+            "priceUsd": overview.get("price"),
+            "liquidity": {"usd": overview.get("liquidity")},
+            "fdv": overview.get("mc") or overview.get("marketCap"),
+            "volume": {"h24": overview.get("v24hUSD") or overview.get("v24h")},
+            "pairCreatedAt": overview.get("createdAt") or overview.get("firstTradeUnixTime"),
+            "chainId": "solana",
+        }
+    
+    dex_data = await dexscreener_token(session, mint)
+    if dex_data:
+        return {
+            "baseToken": {
+                "symbol": dex_data.get("symbol", ""),
+                "name": dex_data.get("name", ""),
+                "address": mint
+            },
+            "priceUsd": dex_data.get("price"),
+            "liquidity": {"usd": dex_data.get("liquidity")},
+            "fdv": dex_data.get("fdv") or dex_data.get("marketCap"),
+            "volume": {"h24": dex_data.get("v24hUSD")},
+            "pairCreatedAt": dex_data.get("pairCreatedAt"),
+            "chainId": "solana",
+        }
+    
+    return None
+
+async def dexscreener_token_fallback(session: aiohttp.ClientSession, mint: str) -> Optional[Dict[str, Any]]:
+    """Wraps dexscreener_token and adapts return to pair dict format."""
+    dex_data = await dexscreener_token(session, mint)
+    if not dex_data:
+        return None
+    
+    return {
+        "baseToken": {
+            "symbol": dex_data.get("symbol", ""),
+            "name": dex_data.get("name", ""),
+            "address": mint
+        },
+        "priceUsd": dex_data.get("price"),
+        "liquidity": {"usd": dex_data.get("liquidity")},
+        "fdv": dex_data.get("fdv") or dex_data.get("marketCap"),
+        "volume": {"h24": dex_data.get("v24hUSD")},
+        "pairCreatedAt": dex_data.get("pairCreatedAt"),
+        "chainId": "solana",
+    }
 
 def extract_holders(data: Dict[str, Any]) -> Optional[int]:
     for k in ("holders", "holder", "holder_count", "holdersCount", "uniqueHolders"):
@@ -1739,16 +1801,18 @@ async def fav_handler(m: Message):
     sub = args[1].lower()
 
     if sub == "add":
-        if len(args) < 3:
-            await m.answer(T("fav_add_usage"), **MSG_KW)
+        if len(args) >= 3:
+            mint = normalize_mint_arg(args[2])
+            if not mint:
+                await m.answer(T("cant_detect_mint"), **MSG_KW)
+                return
+            add_favorite(user_id, mint)
+            await m.answer(T("fav_added", mint=mint), **MSG_KW)
             return
-        mint = normalize_mint_arg(args[2])
-        if not mint:
-            await m.answer(T("cant_detect_mint"), **MSG_KW)
+        else:
+            _awaiting_fav_add[user_id] = True
+            await m.answer(T("awaiting_mint"), **MSG_KW)
             return
-        add_favorite(user_id, mint)
-        await m.answer(T("fav_added", mint=mint), **MSG_KW)
-        return
 
     if sub == "list":
         favs = list_favorites(user_id)
@@ -1760,23 +1824,25 @@ async def fav_handler(m: Message):
         return
     
     if sub == "del":
-        if len(args) < 3:
-            await m.answer(T("fav_del_usage"), **MSG_KW)
+        if len(args) >= 3:
+            mint = normalize_mint_arg(args[2])
+            if not mint:
+                await m.answer(T("cant_detect_mint"), **MSG_KW)
+                return
+            conn = db()
+            cur = conn.execute("DELETE FROM favorites WHERE user_id = ? AND mint = ?", (user_id, mint))
+            deleted = cur.rowcount > 0
+            conn.commit()
+            conn.close()
+            if deleted:
+                await m.answer(T("fav_removed", mint=mint), **MSG_KW)
+            else:
+                await m.answer(T("fav_not_found", mint=mint), **MSG_KW)
             return
-        mint = normalize_mint_arg(args[2])
-        if not mint:
-            await m.answer(T("cant_detect_mint"), **MSG_KW)
-            return
-        conn = db()
-        cur = conn.execute("DELETE FROM favorites WHERE user_id = ? AND mint = ?", (user_id, mint))
-        deleted = cur.rowcount > 0
-        conn.commit()
-        conn.close()
-        if deleted:
-            await m.answer(T("fav_removed", mint=mint), **MSG_KW)
         else:
-            await m.answer(T("fav_not_found", mint=mint), **MSG_KW)
-        return
+            _awaiting_fav_del[user_id] = True
+            await m.answer(T("awaiting_mint"), **MSG_KW)
+            return
 
     await m.answer(T("unknown_subcommand"), **MSG_KW)
 
@@ -1815,43 +1881,44 @@ async def alerts_handler(m: Message):
     sub = args[1].lower()
     
     if sub == "set":
-        if len(args) < 4:
-            await m.answer(T("alert_set_usage"), **MSG_KW)
-            return
-        
-        mint = normalize_mint_arg(args[2])
-        if not mint:
-            await m.answer(T("cant_detect_mint"), **MSG_KW)
-            return
-        
-        try:
-            price = float(args[3])
-        except ValueError:
-            await m.answer(T("alert_invalid_price"), **MSG_KW)
-            return
-        
-        conn = db()
-        cur = conn.execute("SELECT thresholds FROM alerts WHERE user_id = ?", (user_id,))
-        row = cur.fetchone()
-        
-        thresholds = {}
-        if row and row[0]:
+        if len(args) >= 4:
+            mint = normalize_mint_arg(args[2])
+            if not mint:
+                await m.answer(T("cant_detect_mint"), **MSG_KW)
+                return
+            
             try:
-                thresholds = json.loads(row[0])
-            except Exception:
-                thresholds = {}
-        
-        thresholds[mint] = price
-        ts = int(time.time())
-        conn.execute(
-            "INSERT OR REPLACE INTO alerts(user_id, thresholds, created_at) VALUES (?, ?, ?)",
-            (user_id, json.dumps(thresholds), ts)
-        )
-        conn.commit()
-        conn.close()
-        
-        await m.answer(T("alert_set_success", mint=mint[:8] + "...", price=price), **MSG_KW)
-        return
+                price = float(args[3])
+            except ValueError:
+                await m.answer(T("alert_invalid_price"), **MSG_KW)
+                return
+            
+            conn = db()
+            cur = conn.execute("SELECT thresholds FROM alerts WHERE user_id = ?", (user_id,))
+            row = cur.fetchone()
+            
+            thresholds = {}
+            if row and row[0]:
+                try:
+                    thresholds = json.loads(row[0])
+                except Exception:
+                    thresholds = {}
+            
+            thresholds[mint] = price
+            ts = int(time.time())
+            conn.execute(
+                "INSERT OR REPLACE INTO alerts(user_id, thresholds, created_at) VALUES (?, ?, ?)",
+                (user_id, json.dumps(thresholds), ts)
+            )
+            conn.commit()
+            conn.close()
+            
+            await m.answer(T("alert_set_success", mint=mint[:8] + "...", price=price), **MSG_KW)
+            return
+        else:
+            _awaiting_alert_set[user_id] = {"step": "mint"}
+            await m.answer(T("awaiting_mint"), **MSG_KW)
+            return
     
     await m.answer(T("alerts_soon"), **MSG_KW)
 
@@ -2186,10 +2253,83 @@ async def text_input_handler(m: Message):
     if not m.from_user:
         return
     user_id = m.from_user.id
+    text_input = (m.text or "").strip()
+    
+    if user_id in _awaiting_fav_add and _awaiting_fav_add[user_id]:
+        _awaiting_fav_add[user_id] = False
+        mint = normalize_mint_arg(text_input)
+        if not mint:
+            await m.answer(T("cant_detect_mint"), **MSG_KW)
+            return
+        add_favorite(user_id, mint)
+        await m.answer(T("fav_added", mint=mint), **MSG_KW)
+        return
+    
+    if user_id in _awaiting_fav_del and _awaiting_fav_del[user_id]:
+        _awaiting_fav_del[user_id] = False
+        mint = normalize_mint_arg(text_input)
+        if not mint:
+            await m.answer(T("cant_detect_mint"), **MSG_KW)
+            return
+        conn = db()
+        cur = conn.execute("DELETE FROM favorites WHERE user_id = ? AND mint = ?", (user_id, mint))
+        deleted = cur.rowcount > 0
+        conn.commit()
+        conn.close()
+        if deleted:
+            await m.answer(T("fav_removed", mint=mint), **MSG_KW)
+        else:
+            await m.answer(T("fav_not_found", mint=mint), **MSG_KW)
+        return
+    
+    if user_id in _awaiting_alert_set and _awaiting_alert_set[user_id]:
+        state = _awaiting_alert_set[user_id]
+        if state.get("step") == "mint":
+            mint = normalize_mint_arg(text_input)
+            if not mint:
+                await m.answer(T("cant_detect_mint"), **MSG_KW)
+                _awaiting_alert_set.pop(user_id, None)
+                return
+            _awaiting_alert_set[user_id] = {"step": "price", "mint": mint}
+            await m.answer("Now send me the target price (number only):", **MSG_KW)
+            return
+        elif state.get("step") == "price":
+            try:
+                price = float(text_input)
+            except ValueError:
+                await m.answer(T("alert_invalid_price"), **MSG_KW)
+                _awaiting_alert_set.pop(user_id, None)
+                return
+            
+            mint = state.get("mint")
+            _awaiting_alert_set.pop(user_id, None)
+            
+            conn = db()
+            cur = conn.execute("SELECT thresholds FROM alerts WHERE user_id = ?", (user_id,))
+            row = cur.fetchone()
+            
+            thresholds = {}
+            if row and row[0]:
+                try:
+                    thresholds = json.loads(row[0])
+                except Exception:
+                    thresholds = {}
+            
+            thresholds[mint] = price
+            ts = int(time.time())
+            conn.execute(
+                "INSERT OR REPLACE INTO alerts(user_id, thresholds, created_at) VALUES (?, ?, ?)",
+                (user_id, json.dumps(thresholds), ts)
+            )
+            conn.commit()
+            conn.close()
+            
+            await m.answer(T("alert_set_success", mint=mint[:8] + "...", price=price), **MSG_KW)
+            return
     
     if user_id in _awaiting_token_input and _awaiting_token_input[user_id]:
         _awaiting_token_input[user_id] = False
-        mint_arg = (m.text or "").strip()
+        mint_arg = text_input
         mint = normalize_mint_arg(mint_arg)
         if not mint:
             await m.answer(T("cant_detect_mint"), **MSG_KW)
@@ -2228,10 +2368,52 @@ async def text_input_handler(m: Message):
         log_command(user_id, "/token", mint, ok=True, latency_ms=elapsed_ms)
         return
     
+    # Handle menu button taps by converting emoji labels to commands
+    if text_input == "🔍 Scan":
+        _awaiting_token_input[user_id] = False
+        _awaiting_fav_add[user_id] = False
+        _awaiting_fav_del[user_id] = False
+        _awaiting_alert_set.pop(user_id, None)
+        m.text = "/scan"
+        await scan_handler(m)
+        return
+    elif text_input == "🎯 Find Token":
+        _awaiting_token_input[user_id] = True
+        await m.answer(T("awaiting_mint"), **MSG_KW)
+        return
+    elif text_input == "⭐ Add Fav":
+        _awaiting_fav_add[user_id] = True
+        await m.answer(T("awaiting_mint"), **MSG_KW)
+        return
+    elif text_input == "📜 My Favs":
+        m.text = "/fav list"
+        await fav_handler(m)
+        return
+    elif text_input == "❌ Remove Fav":
+        _awaiting_fav_del[user_id] = True
+        await m.answer(T("awaiting_mint"), **MSG_KW)
+        return
+    elif text_input == "🔔 Alerts":
+        m.text = "/alerts"
+        await alerts_handler(m)
+        return
+    elif text_input == "🧾 My Tier":
+        m.text = "/my"
+        await my_handler(m)
+        return
+    elif text_input == "❔ Help":
+        m.text = "/help"
+        await help_handler(m)
+        return
+    elif text_input == "🚪 Logout":
+        m.text = "/logout"
+        await logout_handler(m)
+        return
+    
     if get_user_key(user_id):
         return
     
-    candidate = (m.text or "").strip()
+    candidate = text_input
     ok, msg = is_key_valid_for_product(candidate)
     if ok:
         bind_user(user_id, candidate)
