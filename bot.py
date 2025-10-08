@@ -11,7 +11,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton
 from dotenv import load_dotenv
 import aiohttp
 import base64
@@ -67,12 +67,18 @@ STR = {
     "cant_detect_mint": "❌ Can't detect mint address. Send a Solana mint or a direct link to Birdeye/Solscan.",
     "fetching_data": "Fetching token data…\n`{mint}`",
     "no_data": "No data",
-    "fav_usage": "Usage: `/fav add <mint>` or `/fav list`",
+    "fav_usage": "Usage: `/fav add <mint>`, `/fav list`, or `/fav del <mint>`",
     "fav_add_usage": "Usage: `/fav add <mint>`",
     "fav_added": "✅ {mint} added to favorites.",
     "fav_empty": "Your favorites list is empty.",
     "fav_list_header": "⭐ Your favorites:\n{favs}",
-    "unknown_subcommand": "Unknown subcommand. Use `/fav add <mint>` or `/fav list`",
+    "unknown_subcommand": "Unknown subcommand. Use `/fav add <mint>`, `/fav list`, or `/fav del <mint>`",
+    "fav_del_usage": "Usage: `/fav del <mint>`",
+    "fav_removed": "✅ {mint} removed from favorites.",
+    "fav_not_found": "❌ {mint} not in your favorites.",
+    "btn_fav_remove": "⭐ Remove from favorites",
+    "fav_removed_callback": "Removed from favorites: {mint}",
+    "awaiting_mint": "Send me a mint address, Birdeye/Solscan link, or SYMBOL (MINT) format:",
     "key_accepted": "✅ Key accepted. {msg}\nYou can now use /scan",
     "key_rejected": "⛔ {msg}\nPlease try again.",
     "fav_added_callback": "Added to favorites: {mint}",
@@ -162,6 +168,8 @@ _scan_cache_sessions: Dict[str, Dict[str, Any]] = {}
 TOKEN_SESSION_TTL = 600
 _token_sessions: Dict[str, Dict[str, Any]] = {}
 
+_awaiting_token_input: Dict[int, bool] = {}
+
 def _new_sid() -> str:
     return str(int(time.time()*1000)) + "-" + os.urandom(3).hex()
 
@@ -177,7 +185,19 @@ def _cleanup_token_sessions():
         if _token_sessions[k].get("ts", 0) + TOKEN_SESSION_TTL < now:
             _token_sessions.pop(k, None)
 
-def scan_nav_kb(sid: str, idx: int, mint: str, mode: str = "summary") -> InlineKeyboardMarkup:
+def main_menu_keyboard() -> ReplyKeyboardMarkup:
+    """Create the main menu ReplyKeyboardMarkup."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="/scan"), KeyboardButton(text="/token")],
+            [KeyboardButton(text="/fav add"), KeyboardButton(text="/fav list")],
+            [KeyboardButton(text="/fav del"), KeyboardButton(text="/alerts")],
+            [KeyboardButton(text="/my"), KeyboardButton(text="/logout")],
+        ],
+        resize_keyboard=True
+    )
+
+def scan_nav_kb(sid: str, idx: int, mint: str, user_id: int) -> InlineKeyboardMarkup:
     prev_idx = max(idx - 1, 0)
     next_idx = idx + 1
 
@@ -186,27 +206,32 @@ def scan_nav_kb(sid: str, idx: int, mint: str, mode: str = "summary") -> InlineK
         InlineKeyboardButton(text=T("btn_next"), callback_data=f"scan:session:{sid}:idx:{next_idx}"),
     ]
 
-    row_toggle = (
-        [InlineKeyboardButton(text=T("btn_details"), callback_data=f"scan:session:{sid}:detail:{idx}")]
-        if mode == "summary"
-        else [InlineKeyboardButton(text=T("btn_back"), callback_data=f"scan:session:{sid}:idx:{idx}")]
-    )
-
     be_link = f"https://birdeye.so/token/{mint}?chain=solana"
     solscan_link = f"https://solscan.io/token/{mint}"
     jup_link = f"https://jup.ag/swap?outputMint={mint}"
+    dex_link = f"https://dexscreener.com/solana/{mint}"
 
-    row_links1 = [InlineKeyboardButton(text=T("btn_birdeye"), url=be_link)]
-    row_links2 = [
-        InlineKeyboardButton(text=T("btn_solscan"), url=solscan_link),
+    row_buy_chart = [
         InlineKeyboardButton(text=T("btn_buy"), url=jup_link),
+        InlineKeyboardButton(text=T("btn_chart"), url=dex_link),
     ]
+    row_links = [
+        InlineKeyboardButton(text=T("btn_birdeye"), url=be_link),
+        InlineKeyboardButton(text=T("btn_solscan"), url=solscan_link),
+    ]
+    
+    is_fav = is_favorited(user_id, mint)
+    if is_fav:
+        fav_btn = InlineKeyboardButton(text=T("btn_fav_remove"), callback_data=f"fav:del:{mint}")
+    else:
+        fav_btn = InlineKeyboardButton(text=T("btn_fav_add"), callback_data=f"fav:add:{mint}")
+    
     row_actions = [
-        InlineKeyboardButton(text=T("btn_fav_add"), callback_data=f"fav:add:{mint}"),
+        fav_btn,
         InlineKeyboardButton(text=T("btn_share"), switch_inline_query=mint),
     ]
 
-    return InlineKeyboardMarkup(inline_keyboard=[row_nav, row_toggle, row_links1, row_links2, row_actions])
+    return InlineKeyboardMarkup(inline_keyboard=[row_nav, row_buy_chart, row_links, row_actions])
 
 _last_api_call_ts = 0.0
 _api_lock = asyncio.Lock()
@@ -378,6 +403,15 @@ def list_favorites(user_id: int) -> list[str]:
             (user_id,),
         ).fetchall()
     return [row[0] for row in rows]
+
+def is_favorited(user_id: int, mint: str) -> bool:
+    """Check if a token is in user's favorites"""
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM favorites WHERE user_id = ? AND mint = ? LIMIT 1",
+            (user_id, mint),
+        ).fetchone()
+    return row is not None
 
 def get_user_chain(user_id: int) -> str:
     with sqlite3.connect(DB_PATH) as conn:
@@ -648,6 +682,56 @@ async def fetch_latest_sol_pairs(limit: int = 8) -> List[Dict[str, Any]]:
                         print(f"[SCAN] GeckoTerminal HTTP {r.status}")
         except Exception as e:
             print(f"[SCAN] GeckoTerminal exception: {e}")
+    
+    if not pairs:
+        print("[SCAN] Trying final fallback: DexScreener")
+        try:
+            await api_rate_limit()
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as s:
+                async with s.get("https://api.dexscreener.com/latest/dex/tokens/solana") as r:
+                    if r.status == 200:
+                        try:
+                            j = await r.json()
+                            if j and isinstance(j.get("pairs"), list):
+                                seen_mints = set()
+                                for pair in j["pairs"]:
+                                    try:
+                                        base_token = pair.get("baseToken", {})
+                                        mint = base_token.get("address", "")
+                                        if not mint or mint in seen_mints:
+                                            continue
+                                        seen_mints.add(mint)
+                                        
+                                        created_ts = pair.get("pairCreatedAt", 0)
+                                        
+                                        pairs.append({
+                                            "baseToken": {
+                                                "symbol": base_token.get("symbol", ""),
+                                                "name": base_token.get("name", ""),
+                                                "address": mint
+                                            },
+                                            "priceUsd": float(pair.get("priceUsd", 0)) if pair.get("priceUsd") else None,
+                                            "liquidity": {"usd": float(pair.get("liquidity", {}).get("usd", 0)) if pair.get("liquidity") else None},
+                                            "fdv": float(pair.get("fdv", 0)) if pair.get("fdv") else None,
+                                            "volume": {"h24": float(pair.get("volume", {}).get("h24", 0)) if pair.get("volume") else None},
+                                            "pairCreatedAt": created_ts,
+                                            "chainId": "solana",
+                                        })
+                                    except Exception as e:
+                                        print(f"[SCAN] DexScreener pair error: {e}")
+                                        continue
+                                
+                                pairs.sort(key=lambda x: x.get("pairCreatedAt", 0), reverse=True)
+                                pairs = pairs[:8]
+                                print(f"[SCAN] DexScreener returned {len(pairs)} pairs")
+                            else:
+                                print(f"[SCAN] DexScreener unexpected format: {str(j)[:200]}")
+                        except Exception as e:
+                            print(f"[SCAN] DexScreener parse error: {e}")
+                    else:
+                        print(f"[SCAN] DexScreener HTTP {r.status}")
+        except Exception as e:
+            print(f"[SCAN] DexScreener exception: {e}")
     
     if pairs:
         _scan_cache["ts"] = time.time()
@@ -1170,13 +1254,115 @@ def build_details_text(
     parts = [x.strip() for x in parts if x and x.strip()]
     return "\n\n".join(parts)
 
-def token_keyboard(p: Dict[str, Any], mode: str = "summary") -> InlineKeyboardMarkup:
-    mint = (p.get("baseToken") or {}).get("address")
-    row_toggle = (
-        [InlineKeyboardButton(text=T("btn_details"), callback_data=f"token:{mint}:details")]
-        if mode == "summary"
-        else [InlineKeyboardButton(text=T("btn_back"), callback_data=f"token:{mint}:summary")]
+def build_full_token_text(
+    p: Dict[str, Any],
+    extra: Optional[Dict[str, Any]],
+    mkts: Optional[List[Dict[str, Any]]],
+    helius_info: Optional[Dict[str, Any]],
+    topk_share: Optional[float],
+    is_pro: bool
+) -> str:
+    """Build comprehensive single-card token text with all details at once."""
+    def f_pct(v: Optional[float]) -> str:
+        try:
+            if v is None:
+                return T("fmt_dash")
+            return f"{float(v):.2f}%"
+        except Exception:
+            return T("fmt_dash")
+
+    add_lines = []
+    mint_active = False
+    freeze_active = False
+    if helius_info:
+        mint_txt = format_authority(helius_info.get('mintAuthority'))
+        freeze_txt = format_authority(helius_info.get('freezeAuthority'))
+        mint_active = (helius_info.get('mintAuthority') is not None)
+        freeze_active = (helius_info.get('freezeAuthority') is not None)
+        add_lines.append(T("details_mint_auth", auth=mint_txt))
+        add_lines.append(T("details_freeze_auth", auth=freeze_txt))
+    else:
+        add_lines.append(T("details_mint_auth", auth=T("fmt_dash")))
+        add_lines.append(T("details_freeze_auth", auth=T("fmt_dash")))
+
+    if is_pro:
+        if topk_share is not None:
+            add_lines.append(T("details_top10", pct=f_pct(topk_share)))
+        else:
+            add_lines.append(T("details_top10", pct=T("fmt_dash")))
+    else:
+        add_lines.append(T("details_top10_hidden"))
+
+    liq_usd = (p.get("liquidity") or {}).get("usd")
+    vol24   = (p.get("volume") or {}).get("h24")
+    lp_lock = extract_lp_lock_ratio(extra or {}) if extra else None
+    age_dt = extract_created_at(extra) if extra else None
+    if not age_dt:
+        age_dt = from_unix_ms(p.get("pairCreatedAt"))
+    
+    age_hours = (datetime.now(tz=timezone.utc) - age_dt).total_seconds() / 3600 if age_dt else 0
+    risk_score, risk_reasons = calc_risk_score(
+        liq_usd, vol24, lp_lock, age_hours,
+        mint_active, freeze_active, topk_share
     )
+
+    plan_hint = "" if is_pro else T("details_plan_hint")
+
+    be_block = birdeye_kv_block(extra)
+
+    ex_block = exchanges_block(mkts, is_pro)
+
+    base = p.get("baseToken", {}) or {}
+    symbol = base.get("symbol") or T("unknown_token_symbol")
+    name = base.get("name") or T("unknown_token_name")
+    price_txt = format_usd(p.get("priceUsd"))
+    liq_txt = format_usd(liq_usd)
+    fdv_txt = format_usd(p.get("fdv"))
+    vol_txt = format_usd(vol24)
+    age_txt = human_age(age_dt)
+    holders = extract_holders(extra or {}) if extra else None
+
+    core_lines = [
+        T("card_header", symbol=symbol, name=name),
+        T("card_price", price=price_txt),
+        T("card_liquidity", liq=liq_txt),
+        T("card_fdv", fdv=fdv_txt),
+        T("card_volume", vol=vol_txt),
+        T("card_age", age=age_txt),
+    ]
+    
+    if is_pro:
+        if holders is not None:
+            core_lines.append(T("card_holders", holders=f"{holders:,}"))
+        else:
+            core_lines.append(T("card_holders", holders=T("fmt_dash")))
+        if lp_lock is not None:
+            core_lines.append(T("card_lp_locked", lp=f"{lp_lock:.1f}"))
+        else:
+            core_lines.append(T("card_lp_locked", lp=T("fmt_dash")))
+    else:
+        core_lines.append(T("card_holders_hidden"))
+        core_lines.append(T("card_lp_locked_hidden"))
+    
+    if risk_score < 100:
+        core_lines.append(T("card_risk_score", score=risk_score))
+        if risk_reasons:
+            core_lines.append(T("details_risk_why", reasons=", ".join(risk_reasons)))
+
+    core = "\n".join(core_lines)
+
+    parts = [
+        core,
+        "\n".join(add_lines),
+        plan_hint,
+        be_block,
+        ex_block
+    ]
+    parts = [x.strip() for x in parts if x and x.strip()]
+    return "\n\n".join(parts)
+
+def token_keyboard(p: Dict[str, Any], user_id: Optional[int] = None) -> InlineKeyboardMarkup:
+    mint = (p.get("baseToken") or {}).get("address")
     
     be_link = f"https://birdeye.so/token/{mint}?chain=solana"
     solscan_link = f"https://solscan.io/token/{mint}"
@@ -1191,17 +1377,32 @@ def token_keyboard(p: Dict[str, Any], mode: str = "summary") -> InlineKeyboardMa
         InlineKeyboardButton(text=T("btn_birdeye"), url=be_link),
         InlineKeyboardButton(text=T("btn_solscan"), url=solscan_link),
     ]
-    row_actions = [
-        InlineKeyboardButton(text=T("btn_fav_add"), callback_data=f"fav:add:{mint}"),
-        InlineKeyboardButton(text=T("btn_share"), switch_inline_query=mint),
-    ]
+    
+    is_favorited = False
+    if user_id and mint:
+        conn = db()
+        cur = conn.execute("SELECT 1 FROM favorites WHERE user_id = ? AND mint = ?", (user_id, mint))
+        is_favorited = cur.fetchone() is not None
+        conn.close()
+    
+    if is_favorited:
+        row_actions = [
+            InlineKeyboardButton(text=T("btn_fav_remove"), callback_data=f"fav:del:{mint}"),
+            InlineKeyboardButton(text=T("btn_share"), switch_inline_query=mint),
+        ]
+    else:
+        row_actions = [
+            InlineKeyboardButton(text=T("btn_fav_add"), callback_data=f"fav:add:{mint}"),
+            InlineKeyboardButton(text=T("btn_share"), switch_inline_query=mint),
+        ]
+    
     row_info = [
         InlineKeyboardButton(text="ℹ️ About FDV", callback_data="info:fdv"),
         InlineKeyboardButton(text="ℹ️ About LP", callback_data="info:lp"),
     ]
 
     return InlineKeyboardMarkup(
-        inline_keyboard=[row_toggle, row_buy_chart, row_explorers, row_actions, row_info]
+        inline_keyboard=[row_buy_chart, row_explorers, row_actions, row_info]
     )
 
 async def helius_rpc(session: aiohttp.ClientSession, method: str, params: list) -> Optional[dict]:
@@ -1272,7 +1473,7 @@ async def start_handler(m: Message):
         return
     key = get_user_key(m.from_user.id)
     if key:
-        await m.answer(T("start", product=PRODUCT.replace("_", "\\_")), **MSG_KW)
+        await m.answer(T("start", product=PRODUCT.replace("_", "\\_")), reply_markup=main_menu_keyboard(), **MSG_KW)
     else:
         await m.answer(T("enter_key"), **MSG_KW)
 
@@ -1366,15 +1567,35 @@ async def scan_handler(m: Message):
 
     async with aiohttp.ClientSession() as session:
         extra = None
+        mkts = None
+        helius_info = None
+        topk_share = None
+        
         if BIRDEYE_API_KEY and mint:
-            extra = await birdeye_overview(session, mint)
+            try:
+                extra, mkts = await asyncio.gather(
+                    birdeye_overview(session, mint),
+                    birdeye_markets(session, mint),
+                )
+            except Exception:
+                extra, mkts = None, None
+        
+        if HELIUS_RPC_URL and mint:
+            try:
+                helius_info, topk_share = await asyncio.gather(
+                    helius_get_mint_info(session, mint),
+                    helius_top_holders_share(session, mint),
+                )
+            except Exception:
+                helius_info, topk_share = None, None
+        
         if p.get("priceUsd") is None and mint:
             jp = await jupiter_price(session, mint)
             if jp is not None:
                 p["priceUsd"] = jp
 
-    text = build_summary_text(p, extra, mkts=None, is_pro=is_pro)
-    kb = scan_nav_kb(sid, 0, mint, mode="summary")
+    text = build_full_token_text(p, extra, mkts, helius_info, topk_share, is_pro)
+    kb = scan_nav_kb(sid, 0, mint, user_id)
 
     try:
         await status.edit_text(text, reply_markup=kb, **MSG_KW)
@@ -1408,8 +1629,8 @@ async def token_handler(m: Message):
 
     args = (m.text or "").split(maxsplit=1)
     if len(args) < 2:
-        log_command(user_id, "/token", "", ok=False, err="usage")
-        await m.answer(T("usage_token"), **MSG_KW)
+        _awaiting_token_input[user_id] = True
+        await m.answer(T("awaiting_mint"), **MSG_KW)
         return
 
     mint = normalize_mint_arg(args[1])
@@ -1427,6 +1648,8 @@ async def token_handler(m: Message):
         security = None
         mkts = None
         birdeye_price_val = None
+        helius_info = None
+        topk_share = None
         
         if BIRDEYE_API_KEY:
             results = await asyncio.gather(
@@ -1447,6 +1670,10 @@ async def token_handler(m: Message):
         
         if security and extra:
             extra.update(security)
+        
+        if HELIUS_RPC_URL:
+            helius_info = await helius_get_mint_info(session, mint)
+            topk_share = await helius_top_holders_share(session, mint)
         
         p = {
             "baseToken": {
@@ -1478,11 +1705,13 @@ async def token_handler(m: Message):
         "p": p,
         "extra": extra,
         "mkts": mkts,
+        "helius_info": helius_info,
+        "topk_share": topk_share,
         "ts": time.time()
     }
 
-    text = build_summary_text(p, extra, mkts, is_pro)
-    kb = token_keyboard(p, mode="summary")
+    text = build_full_token_text(p, extra, mkts, helius_info, topk_share, is_pro)
+    kb = token_keyboard(p, user_id=user_id)
 
     try:
         await status.edit_text(text, reply_markup=kb, **MSG_KW)
@@ -1528,6 +1757,25 @@ async def fav_handler(m: Message):
             return
         fav_lines = "\n".join(f"• `{f}`" for f in favs)
         await m.answer(T("fav_list_header", favs=fav_lines), **MSG_KW)
+        return
+    
+    if sub == "del":
+        if len(args) < 3:
+            await m.answer(T("fav_del_usage"), **MSG_KW)
+            return
+        mint = normalize_mint_arg(args[2])
+        if not mint:
+            await m.answer(T("cant_detect_mint"), **MSG_KW)
+            return
+        conn = db()
+        cur = conn.execute("DELETE FROM favorites WHERE user_id = ? AND mint = ?", (user_id, mint))
+        deleted = cur.rowcount > 0
+        conn.commit()
+        conn.close()
+        if deleted:
+            await m.answer(T("fav_removed", mint=mint), **MSG_KW)
+        else:
+            await m.answer(T("fav_not_found", mint=mint), **MSG_KW)
         return
 
     await m.answer(T("unknown_subcommand"), **MSG_KW)
@@ -1735,16 +1983,30 @@ async def scan_cb_handler(cb: CallbackQuery):
     p = pairs[idx]
     mint = (p.get("baseToken") or {}).get("address", "")
 
-    text = None
-    kb = None
-
     async with aiohttp.ClientSession() as session:
         extra = None
+        mkts = None
+        helius_info = None
+        topk_share = None
+        
         if BIRDEYE_API_KEY and mint:
             try:
-                extra = await birdeye_overview(session, mint)
+                extra, mkts = await asyncio.gather(
+                    birdeye_overview(session, mint),
+                    birdeye_markets(session, mint),
+                )
             except Exception:
-                extra = None
+                extra, mkts = None, None
+        
+        if HELIUS_RPC_URL and mint:
+            try:
+                helius_info, topk_share = await asyncio.gather(
+                    helius_get_mint_info(session, mint),
+                    helius_top_holders_share(session, mint),
+                )
+            except Exception:
+                helius_info, topk_share = None, None
+        
         if (p.get("priceUsd") is None) and mint:
             try:
                 jp = await jupiter_price(session, mint)
@@ -1753,28 +2015,8 @@ async def scan_cb_handler(cb: CallbackQuery):
             except Exception:
                 pass
 
-        if action == "detail":
-            mkts = None
-            if BIRDEYE_API_KEY and mint:
-                try:
-                    mkts = await birdeye_markets(session, mint)
-                except Exception:
-                    mkts = None
-            helius_info = None
-            topk_share = None
-            if HELIUS_RPC_URL and mint:
-                try:
-                    helius_info, topk_share = await asyncio.gather(
-                        helius_get_mint_info(session, mint),
-                        helius_top_holders_share(session, mint),
-                    )
-                except Exception:
-                    helius_info, topk_share = None, None
-            text = build_details_text(p, extra, mkts, helius_info, topk_share, is_pro)
-            kb = scan_nav_kb(sid, idx, mint, mode="details")
-        else:
-            text = build_summary_text(p, extra, mkts=None, is_pro=is_pro)
-            kb = scan_nav_kb(sid, idx, mint, mode="summary")
+    text = build_full_token_text(p, extra, mkts, helius_info, topk_share, is_pro)
+    kb = scan_nav_kb(sid, idx, mint, user_id)
 
     try:
         await cb.message.edit_text(text, reply_markup=kb, **MSG_KW)
@@ -1803,7 +2045,98 @@ async def fav_add_callback(cb: CallbackQuery):
 
     add_favorite(user_id, mint)
     log_command(user_id, "callback:fav:add", mint, ok=True)
+    
+    if cb.message and cb.message.reply_markup:
+        is_scan_context = any(
+            "scan:session:" in btn.callback_data
+            for row in cb.message.reply_markup.inline_keyboard
+            for btn in row
+            if hasattr(btn, 'callback_data') and btn.callback_data
+        )
+        
+        if is_scan_context:
+            for row in cb.message.reply_markup.inline_keyboard:
+                for btn in row:
+                    if hasattr(btn, 'callback_data') and btn.callback_data and "scan:session:" in btn.callback_data:
+                        cb_parts = btn.callback_data.split(":")
+                        if len(cb_parts) >= 5:
+                            sid = cb_parts[2]
+                            idx = int(cb_parts[4])
+                            kb = scan_nav_kb(sid, idx, mint, user_id)
+                            try:
+                                await cb.message.edit_reply_markup(reply_markup=kb)
+                            except Exception:
+                                pass
+                            break
+                break
+        else:
+            p = {"baseToken": {"address": mint}}
+            kb = token_keyboard(p, user_id=user_id)
+            try:
+                await cb.message.edit_reply_markup(reply_markup=kb)
+            except Exception:
+                pass
+    
     await cb.answer(T("fav_added_callback", mint=mint))
+
+@dp.callback_query(F.data.startswith("fav:del:"))
+async def fav_del_callback(cb: CallbackQuery):
+    if not cb.from_user:
+        return
+    parts = cb.data.split(":")
+    if len(parts) < 3:
+        await cb.answer(T("bad_callback"))
+        return
+    mint = parts[2]
+    user_id = cb.from_user.id
+
+    if not get_user_key(user_id):
+        await cb.answer(T("no_active_access"))
+        return
+
+    conn = db()
+    cur = conn.execute("DELETE FROM favorites WHERE user_id = ? AND mint = ?", (user_id, mint))
+    deleted = cur.rowcount > 0
+    conn.commit()
+    conn.close()
+    
+    log_command(user_id, "callback:fav:del", mint, ok=deleted)
+    
+    if cb.message and deleted and cb.message.reply_markup:
+        is_scan_context = any(
+            "scan:session:" in btn.callback_data
+            for row in cb.message.reply_markup.inline_keyboard
+            for btn in row
+            if hasattr(btn, 'callback_data') and btn.callback_data
+        )
+        
+        if is_scan_context:
+            for row in cb.message.reply_markup.inline_keyboard:
+                for btn in row:
+                    if hasattr(btn, 'callback_data') and btn.callback_data and "scan:session:" in btn.callback_data:
+                        cb_parts = btn.callback_data.split(":")
+                        if len(cb_parts) >= 5:
+                            sid = cb_parts[2]
+                            idx = int(cb_parts[4])
+                            kb = scan_nav_kb(sid, idx, mint, user_id)
+                            try:
+                                await cb.message.edit_reply_markup(reply_markup=kb)
+                            except Exception:
+                                pass
+                            break
+                break
+        else:
+            p = {"baseToken": {"address": mint}}
+            kb = token_keyboard(p, user_id=user_id)
+            try:
+                await cb.message.edit_reply_markup(reply_markup=kb)
+            except Exception:
+                pass
+    
+    if deleted:
+        await cb.answer(T("fav_removed_callback", mint=mint))
+    else:
+        await cb.answer(T("fav_not_found", mint=mint))
 
 @dp.callback_query(F.data.startswith("info:"))
 async def info_callback(cb: CallbackQuery):
@@ -1849,16 +2182,60 @@ async def chain_handler(m: Message):
     await m.answer(T("chain_set", chain=chain_names.get(chain, chain)), **MSG_KW)
 
 @dp.message(F.text)
-async def key_input_handler(m: Message):
+async def text_input_handler(m: Message):
     if not m.from_user:
         return
-    if get_user_key(m.from_user.id):
+    user_id = m.from_user.id
+    
+    if user_id in _awaiting_token_input and _awaiting_token_input[user_id]:
+        _awaiting_token_input[user_id] = False
+        mint_arg = (m.text or "").strip()
+        mint = normalize_mint_arg(mint_arg)
+        if not mint:
+            await m.answer(T("cant_detect_mint"), **MSG_KW)
+            return
+        
+        start_time = time.time()
+        status = await m.answer(T("fetching_data", mint=mint), **MSG_KW)
+        
+        async with aiohttp.ClientSession() as session:
+            p = await fetch_pair_data(session, mint)
+            if not p:
+                p_fallback = await dexscreener_token_fallback(session, mint)
+                if p_fallback:
+                    p = p_fallback
+            
+            if not p:
+                log_command(user_id, "/token", mint, ok=False, err="not_found")
+                await status.edit_text(T("token_not_found"), **MSG_KW)
+                return
+            
+            extra = await birdeye_overview(session, mint) if BIRDEYE_API_KEY and mint else None
+            mkts = await birdeye_markets(session, mint) if BIRDEYE_API_KEY and mint else None
+            helius_info = await helius_get_mint_info(session, mint) if HELIUS_RPC_URL and mint else None
+            topk_share = await helius_top_holders_share(session, mint) if HELIUS_RPC_URL and mint else None
+        
+        is_pro = is_pro_user(user_id)
+        text = build_full_token_text(p, extra, mkts, helius_info, topk_share, is_pro)
+        kb = token_keyboard(p, user_id=user_id)
+        
+        try:
+            await status.edit_text(text, reply_markup=kb, **MSG_KW)
+        except Exception:
+            await m.answer(text, reply_markup=kb, **MSG_KW)
+        
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        log_command(user_id, "/token", mint, ok=True, latency_ms=elapsed_ms)
         return
+    
+    if get_user_key(user_id):
+        return
+    
     candidate = (m.text or "").strip()
     ok, msg = is_key_valid_for_product(candidate)
     if ok:
-        bind_user(m.from_user.id, candidate)
-        await m.answer(T("key_accepted", msg=msg), **MSG_KW)
+        bind_user(user_id, candidate)
+        await m.answer(T("key_accepted", msg=msg), reply_markup=main_menu_keyboard(), **MSG_KW)
     else:
         await m.answer(T("key_rejected", msg=msg), **MSG_KW)
 
