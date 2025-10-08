@@ -38,10 +38,7 @@ STR = {
     "no_access": "⛔ No access. Please enter your key via /start.",
     "access_invalid": "⛔ Access invalid: {msg}\nSend a new key.",
     "cooldown": "⏳ Please wait {remaining}s before using /scan again (anti-spam).",
-    "no_pairs": (
-        "😕 No fresh pairs available via Birdeye on the current plan.\n"
-        "Try `/token <mint>` or upgrade your data plan."
-    ),
+    "no_pairs": "😕 No fresh pairs available via Birdeye on the current plan.\nTry `/token <mint>` or upgrade your data plan.",
     "scan_progress": "🔍 Scanning Solana pairs… ({i}/{n})",
     "start": "Welcome to the {product} bot! Use /help to see commands.",
     "help": (
@@ -50,6 +47,7 @@ STR = {
         "/scan — scan fresh pairs\n"
         "/fav add <mint> — add token to favorites\n"
         "/fav list — show your favorites\n"
+        "/alerts — manage price alerts (coming soon)\n"
         "/my — show your subscription status\n"
         "/logout — remove your key\n"
         "/help — show this help"
@@ -128,6 +126,9 @@ STR = {
     "fmt_kilo": "k",
     "fmt_hours": "h",
     "fmt_days": "d",
+    "card_risk_score": "⚠️ Risk: {score}/100",
+    "details_risk_why": "Why: {reasons}",
+    "alerts_soon": "🔔 Alerts are coming soon. Stay tuned!",
 }
 
 def T(key: str, **kwargs) -> str:
@@ -247,6 +248,15 @@ def db():
             ok INTEGER NOT NULL,
             ms INTEGER,
             err TEXT
+        );
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS alerts (
+            user_id INTEGER PRIMARY KEY,
+            thresholds TEXT,
+            allowlist TEXT,
+            blocklist TEXT,
+            created_at INTEGER NOT NULL
         );
     """)
     return conn
@@ -423,120 +433,173 @@ async def fetch_latest_sol_pairs(limit: int = 8) -> List[Dict[str, Any]]:
     if (_scan_cache["ts"] + SCAN_CACHE_TTL) > time.time() and _scan_cache["pairs"]:
         return _scan_cache["pairs"][:limit]
 
-    if not BIRDEYE_API_KEY:
-        print("[SCAN] Birdeye: BIRDEYE_API_KEY is empty -> returning []")
-        return []
-
-    headers = {
-        "accept": "application/json",
-        "X-API-KEY": BIRDEYE_API_KEY,
-        "x-chain": "solana"
-    }
-
     pairs = []
+
+    if not BIRDEYE_API_KEY:
+        print("[SCAN] Birdeye: BIRDEYE_API_KEY is empty -> skipping Birdeye, will try DexScreener")
+    else:
+        headers = {
+            "accept": "application/json",
+            "X-API-KEY": BIRDEYE_API_KEY,
+            "x-chain": "solana"
+        }
     
-    url_markets = f"{BIRDEYE_BASE}/defi/v2/markets"
-    params_markets = {"sort_by": "liquidity", "sort_type": "desc", "offset": 0, "limit": 50}
-    
-    try:
-        await api_rate_limit()
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
-            async with s.get(url_markets, headers=headers, params=params_markets) as r:
-                status = r.status
-                if status == 403:
-                    print("[SCAN] /defi/v2/markets returned 403 (plan limit) - falling back to recently_added")
-                elif status == 429:
-                    print("[SCAN] /defi/v2/markets returned 429 (rate limit) - falling back to recently_added")
-                elif status == 200:
-                    try:
-                        j = await r.json()
-                        if j and j.get("success"):
-                            data = j.get("data") or {}
-                            items = data.get("items") if isinstance(data, dict) else data
-                            if items and isinstance(items, list):
-                                for m in items[:50]:
-                                    try:
-                                        base = {
-                                            "symbol": m.get("symbol") or "",
-                                            "name": m.get("name") or "",
-                                            "address": m.get("address") or m.get("baseAddress") or ""
-                                        }
-                                        pairs.append({
-                                            "baseToken": base,
-                                            "priceUsd": m.get("price"),
-                                            "liquidity": {"usd": m.get("liquidity") or m.get("liquidityUsd")},
-                                            "fdv": m.get("marketCap") or m.get("fdv"),
-                                            "volume": {"h24": m.get("v24hUSD") or m.get("v24h") or m.get("volume24h")},
-                                            "pairCreatedAt": m.get("createdAt") or m.get("firstTradeAt"),
-                                            "chainId": "solana",
-                                        })
-                                    except Exception as e:
-                                        print(f"[SCAN] pair build error: {e}")
-                                        continue
-                                print(f"[SCAN] /defi/v2/markets returned {len(pairs)} pairs")
-                        else:
-                            print(f"[SCAN] /defi/v2/markets success==false: {str(j)[:200]}")
-                    except Exception as e:
-                        print(f"[SCAN] /defi/v2/markets parse error: {e}")
-                else:
-                    try:
-                        txt = await r.text()
-                    except Exception:
-                        txt = "<no body>"
-                    print(f"[SCAN] /defi/v2/markets HTTP {status} -> {txt[:200]}")
-    except Exception as e:
-        print(f"[SCAN] /defi/v2/markets exception: {e}")
-    
-    if not pairs:
-        print("[SCAN] Trying fallback: /defi/recently_added")
-        url_recent = f"{BIRDEYE_BASE}/defi/recently_added"
-        params_recent = {"chain": "solana", "limit": 20}
+        url_markets = f"{BIRDEYE_BASE}/defi/v2/markets"
+        params_markets = {"sort_by": "liquidity", "sort_type": "desc", "offset": 0, "limit": 50}
         
         try:
             await api_rate_limit()
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
-                async with s.get(url_recent, headers=headers, params=params_recent) as r:
-                    if r.status == 200:
+                async with s.get(url_markets, headers=headers, params=params_markets) as r:
+                    status = r.status
+                    if status == 403:
+                        print("[SCAN] /defi/v2/markets returned 403 (plan limit) - falling back to recently_added")
+                    elif status == 429:
+                        print("[SCAN] /defi/v2/markets returned 429 (rate limit) - falling back to recently_added")
+                    elif status == 200:
                         try:
                             j = await r.json()
                             if j and j.get("success"):
                                 data = j.get("data") or {}
-                                items = data.get("items") if isinstance(data, dict) else (data if isinstance(data, list) else [])
-                                for token in (items or []):
-                                    try:
-                                        mint = token.get("address") or token.get("mint") or ""
-                                        if not mint:
+                                items = data.get("items") if isinstance(data, dict) else data
+                                if items and isinstance(items, list):
+                                    for m in items[:50]:
+                                        try:
+                                            base = {
+                                                "symbol": m.get("symbol") or "",
+                                                "name": m.get("name") or "",
+                                                "address": m.get("address") or m.get("baseAddress") or ""
+                                            }
+                                            pairs.append({
+                                                "baseToken": base,
+                                                "priceUsd": m.get("price"),
+                                                "liquidity": {"usd": m.get("liquidity") or m.get("liquidityUsd")},
+                                                "fdv": m.get("marketCap") or m.get("fdv"),
+                                                "volume": {"h24": m.get("v24hUSD") or m.get("v24h") or m.get("volume24h")},
+                                                "pairCreatedAt": m.get("createdAt") or m.get("firstTradeAt"),
+                                                "chainId": "solana",
+                                            })
+                                        except Exception as e:
+                                            print(f"[SCAN] pair build error: {e}")
                                             continue
-                                        base = {
-                                            "symbol": token.get("symbol") or "",
-                                            "name": token.get("name") or "",
-                                            "address": mint
-                                        }
-                                        pairs.append({
-                                            "baseToken": base,
-                                            "priceUsd": token.get("price"),
-                                            "liquidity": {"usd": token.get("liquidity")},
-                                            "fdv": token.get("mc") or token.get("marketCap"),
-                                            "volume": {"h24": token.get("v24hUSD") or token.get("v24h")},
-                                            "pairCreatedAt": token.get("createdAt") or token.get("firstTradeUnixTime"),
-                                            "chainId": "solana",
-                                        })
-                                    except Exception as e:
-                                        print(f"[SCAN] recently_added build error: {e}")
-                                        continue
-                                print(f"[SCAN] /defi/recently_added returned {len(pairs)} pairs")
+                                    print(f"[SCAN] /defi/v2/markets returned {len(pairs)} pairs")
                             else:
-                                print(f"[SCAN] /defi/recently_added success==false: {str(j)[:200]}")
+                                print(f"[SCAN] /defi/v2/markets success==false: {str(j)[:200]}")
                         except Exception as e:
-                            print(f"[SCAN] /defi/recently_added parse error: {e}")
+                            print(f"[SCAN] /defi/v2/markets parse error: {e}")
                     else:
                         try:
                             txt = await r.text()
                         except Exception:
                             txt = "<no body>"
-                        print(f"[SCAN] /defi/recently_added HTTP {r.status} -> {txt[:200]}")
+                        print(f"[SCAN] /defi/v2/markets HTTP {status} -> {txt[:200]}")
         except Exception as e:
-            print(f"[SCAN] /defi/recently_added exception: {e}")
+            print(f"[SCAN] /defi/v2/markets exception: {e}")
+        
+        if not pairs:
+            print("[SCAN] Trying fallback: /defi/recently_added")
+            url_recent = f"{BIRDEYE_BASE}/defi/recently_added"
+            params_recent = {"chain": "solana", "limit": 20}
+            
+            try:
+                await api_rate_limit()
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
+                    async with s.get(url_recent, headers=headers, params=params_recent) as r:
+                        if r.status == 200:
+                            try:
+                                j = await r.json()
+                                if j and j.get("success"):
+                                    data = j.get("data") or {}
+                                    items = data.get("items") if isinstance(data, dict) else (data if isinstance(data, list) else [])
+                                    for token in (items or []):
+                                        try:
+                                            mint = token.get("address") or token.get("mint") or ""
+                                            if not mint:
+                                                continue
+                                            base = {
+                                                "symbol": token.get("symbol") or "",
+                                                "name": token.get("name") or "",
+                                                "address": mint
+                                            }
+                                            pairs.append({
+                                                "baseToken": base,
+                                                "priceUsd": token.get("price"),
+                                                "liquidity": {"usd": token.get("liquidity")},
+                                                "fdv": token.get("mc") or token.get("marketCap"),
+                                                "volume": {"h24": token.get("v24hUSD") or token.get("v24h")},
+                                                "pairCreatedAt": token.get("createdAt") or token.get("firstTradeUnixTime"),
+                                                "chainId": "solana",
+                                            })
+                                        except Exception as e:
+                                            print(f"[SCAN] recently_added build error: {e}")
+                                            continue
+                                    print(f"[SCAN] /defi/recently_added returned {len(pairs)} pairs")
+                                else:
+                                    print(f"[SCAN] /defi/recently_added success==false: {str(j)[:200]}")
+                            except Exception as e:
+                                print(f"[SCAN] /defi/recently_added parse error: {e}")
+                        else:
+                            try:
+                                txt = await r.text()
+                            except Exception:
+                                txt = "<no body>"
+                            print(f"[SCAN] /defi/recently_added HTTP {r.status} -> {txt[:200]}")
+            except Exception as e:
+                print(f"[SCAN] /defi/recently_added exception: {e}")
+    
+    if not pairs:
+        print("[SCAN] Trying external fallback: DexScreener")
+        try:
+            await api_rate_limit()
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as s:
+                async with s.get("https://api.dexscreener.com/latest/dex/pairs/solana") as r:
+                    if r.status == 200:
+                        try:
+                            j = await r.json()
+                            if j and isinstance(j.get("pairs"), list):
+                                seen_mints = set()
+                                for pair in j["pairs"]:
+                                    try:
+                                        base_token = pair.get("baseToken") or {}
+                                        mint = base_token.get("address", "")
+                                        if not mint or mint in seen_mints:
+                                            continue
+                                        seen_mints.add(mint)
+                                        
+                                        created_at = pair.get("pairCreatedAt")
+                                        if isinstance(created_at, (int, float)):
+                                            created_ts = int(created_at)
+                                        else:
+                                            created_ts = 0
+                                        
+                                        pairs.append({
+                                            "baseToken": {
+                                                "symbol": base_token.get("symbol", ""),
+                                                "name": base_token.get("name", ""),
+                                                "address": mint
+                                            },
+                                            "priceUsd": float(pair.get("priceUsd", 0)) if pair.get("priceUsd") else None,
+                                            "liquidity": {"usd": float(pair.get("liquidity", {}).get("usd", 0)) if pair.get("liquidity") else None},
+                                            "fdv": float(pair.get("fdv", 0)) if pair.get("fdv") else None,
+                                            "volume": {"h24": float(pair.get("volume", {}).get("h24", 0)) if pair.get("volume") else None},
+                                            "pairCreatedAt": created_ts,
+                                            "chainId": "solana",
+                                        })
+                                    except Exception as e:
+                                        print(f"[SCAN] DexScreener pair error: {e}")
+                                        continue
+                                
+                                pairs.sort(key=lambda x: x.get("pairCreatedAt", 0), reverse=True)
+                                pairs = pairs[:8]
+                                print(f"[SCAN] DexScreener returned {len(pairs)} pairs")
+                            else:
+                                print(f"[SCAN] DexScreener unexpected format: {str(j)[:200]}")
+                        except Exception as e:
+                            print(f"[SCAN] DexScreener parse error: {e}")
+                    else:
+                        print(f"[SCAN] DexScreener HTTP {r.status}")
+        except Exception as e:
+            print(f"[SCAN] DexScreener exception: {e}")
     
     if pairs:
         _scan_cache["ts"] = time.time()
@@ -768,6 +831,50 @@ def risk_flags(
     
     return flags
 
+def calc_risk_score(
+    liquidity: Optional[float],
+    volume: Optional[float],
+    lp_lock_pct: Optional[float],
+    token_age_hours: float,
+    mint_auth_active: bool,
+    freeze_auth_active: bool,
+    top10_pct: Optional[float]
+) -> tuple[int, List[str]]:
+    """Calculate risk score (0-100) where 100 = low risk. Returns (score, reasons)."""
+    reasons = []
+    score = 100
+    
+    if liquidity is not None and liquidity < 10_000:
+        score -= 15
+        reasons.append(T("risk_low_liquidity"))
+    
+    if volume is not None and volume < 10_000:
+        score -= 10
+        reasons.append(T("risk_low_volume"))
+    
+    if lp_lock_pct is not None and lp_lock_pct < 20:
+        score -= 15
+        reasons.append(T("risk_low_lp_lock"))
+    
+    if token_age_hours < 6:
+        score -= 20
+        reasons.append(T("risk_new_token"))
+    
+    if mint_auth_active:
+        score -= 15
+        reasons.append(T("risk_mint_authority"))
+    
+    if freeze_auth_active:
+        score -= 15
+        reasons.append(T("risk_freeze_authority"))
+    
+    if top10_pct is not None and top10_pct > 50:
+        score -= 10
+        reasons.append(T("risk_top10_concentration", pct=f"{top10_pct:.0f}"))
+    
+    score = max(0, min(100, score))
+    return score, reasons
+
 def token_card(
     p: Dict[str, Any],
     extra: Optional[Dict[str, Any]],
@@ -805,11 +912,11 @@ def token_card(
         if holders is not None:
             lines.append(T("card_holders", holders=f"{holders:,}"))
         else:
-            lines.append(f"Holders: {T('fmt_dash')}")
+            lines.append(T("card_holders", holders=T("fmt_dash")))
         if lp_lock is not None:
             lines.append(T("card_lp_locked", lp=f"{lp_lock:.1f}"))
         else:
-            lines.append(f"LP Locked: {T('fmt_dash')}")
+            lines.append(T("card_lp_locked", lp=T("fmt_dash")))
     else:
         lines.append(T("card_holders_hidden"))
         lines.append(T("card_lp_locked_hidden"))
@@ -835,9 +942,50 @@ def build_summary_text(
     if not age_dt:
         age_dt = from_unix_ms(p.get("pairCreatedAt"))
     
-    risk_list = risk_flags(liq_usd, vol24, lp_lock, age_dt, mint_active, freeze_active, top10_share)
+    age_hours = (datetime.now(tz=timezone.utc) - age_dt).total_seconds() / 3600 if age_dt else 0
+    risk_score, risk_reasons = calc_risk_score(
+        liq_usd, vol24, lp_lock, age_hours, 
+        mint_active, freeze_active, top10_share
+    )
     
-    return token_card(p, extra, is_pro, risk_list)
+    base = p.get("baseToken", {}) or {}
+    symbol = base.get("symbol") or T("unknown_token_symbol")
+    name   = base.get("name") or T("unknown_token_name")
+    price  = p.get("priceUsd")
+    price_txt = format_usd(price)
+    
+    liq_txt = format_usd(liq_usd)
+    fdv = p.get("fdv")
+    age_txt = human_age(age_dt)
+    
+    holders = extract_holders(extra or {}) if extra else None
+    
+    lines = [
+        T("card_header", symbol=symbol, name=name),
+        T("card_price", price=price_txt),
+        T("card_liquidity", liq=liq_txt),
+        T("card_fdv", fdv=format_usd(fdv)),
+        T("card_volume", vol=format_usd(vol24)),
+        T("card_age", age=age_txt),
+    ]
+    
+    if is_pro:
+        if holders is not None:
+            lines.append(T("card_holders", holders=f"{holders:,}"))
+        else:
+            lines.append(T("card_holders", holders=T("fmt_dash")))
+        if lp_lock is not None:
+            lines.append(T("card_lp_locked", lp=f"{lp_lock:.1f}"))
+        else:
+            lines.append(T("card_lp_locked", lp=T("fmt_dash")))
+    else:
+        lines.append(T("card_holders_hidden"))
+        lines.append(T("card_lp_locked_hidden"))
+    
+    if risk_score < 100:
+        lines.append(T("card_risk_score", score=risk_score))
+    
+    return "\n".join(lines)
 
 def birdeye_kv_block(extra: Optional[Dict[str, Any]]) -> str:
     if not extra:
@@ -919,7 +1067,7 @@ def build_details_text(
         if topk_share is not None:
             add_lines.append(T("details_top10", pct=f_pct(topk_share)))
         else:
-            add_lines.append(f"Top-10 holders: {T('fmt_dash')}")
+            add_lines.append(T("details_top10", pct=T("fmt_dash")))
     else:
         add_lines.append(T("details_top10_hidden"))
 
@@ -930,7 +1078,11 @@ def build_details_text(
     if not age_dt:
         age_dt = from_unix_ms(p.get("pairCreatedAt"))
     
-    risk_list = risk_flags(liq_usd, vol24, lp_lock, age_dt, mint_active, freeze_active, topk_share)
+    age_hours = (datetime.now(tz=timezone.utc) - age_dt).total_seconds() / 3600 if age_dt else 0
+    risk_score, risk_reasons = calc_risk_score(
+        liq_usd, vol24, lp_lock, age_hours,
+        mint_active, freeze_active, topk_share
+    )
 
     plan_hint = "" if is_pro else T("details_plan_hint")
 
@@ -938,7 +1090,44 @@ def build_details_text(
 
     ex_block = exchanges_block(mkts, is_pro)
 
-    core = token_card(p, extra, is_pro, risk_list)
+    base = p.get("baseToken", {}) or {}
+    symbol = base.get("symbol") or T("unknown_token_symbol")
+    name = base.get("name") or T("unknown_token_name")
+    price_txt = format_usd(p.get("priceUsd"))
+    liq_txt = format_usd(liq_usd)
+    fdv_txt = format_usd(p.get("fdv"))
+    vol_txt = format_usd(vol24)
+    age_txt = human_age(age_dt)
+    holders = extract_holders(extra or {}) if extra else None
+
+    core_lines = [
+        T("card_header", symbol=symbol, name=name),
+        T("card_price", price=price_txt),
+        T("card_liquidity", liq=liq_txt),
+        T("card_fdv", fdv=fdv_txt),
+        T("card_volume", vol=vol_txt),
+        T("card_age", age=age_txt),
+    ]
+    
+    if is_pro:
+        if holders is not None:
+            core_lines.append(T("card_holders", holders=f"{holders:,}"))
+        else:
+            core_lines.append(T("card_holders", holders=T("fmt_dash")))
+        if lp_lock is not None:
+            core_lines.append(T("card_lp_locked", lp=f"{lp_lock:.1f}"))
+        else:
+            core_lines.append(T("card_lp_locked", lp=T("fmt_dash")))
+    else:
+        core_lines.append(T("card_holders_hidden"))
+        core_lines.append(T("card_lp_locked_hidden"))
+    
+    if risk_score < 100:
+        core_lines.append(T("card_risk_score", score=risk_score))
+        if risk_reasons:
+            core_lines.append(T("details_risk_why", reasons=", ".join(risk_reasons)))
+
+    core = "\n".join(core_lines)
 
     parts = [
         core,
@@ -1281,6 +1470,17 @@ async def fav_handler(m: Message):
         return
 
     await m.answer(T("unknown_subcommand"), **MSG_KW)
+
+@dp.message(Command("alerts"))
+async def alerts_handler(m: Message):
+    if not m.from_user:
+        return
+    user_id = m.from_user.id
+    key = get_user_key(user_id)
+    if not key:
+        await m.answer(T("no_access"), **MSG_KW)
+        return
+    await m.answer(T("alerts_soon"), **MSG_KW)
 
 @dp.callback_query(F.data.startswith("token:"))
 async def token_callback_handler(cb: CallbackQuery):
