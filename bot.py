@@ -3,6 +3,7 @@ import asyncio
 import os
 import sqlite3
 import time
+import json
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 
@@ -129,6 +130,14 @@ STR = {
     "card_risk_score": "⚠️ Risk: {score}/100",
     "details_risk_why": "Why: {reasons}",
     "alerts_soon": "🔔 Alerts are coming soon. Stay tuned!",
+    "my_status_valid": "✅ {msg}\nTier: {tier}",
+    "my_status_invalid": "⛔ {msg}",
+    "alert_set_usage": "Usage: `/alerts set <mint> <price>`",
+    "alert_set_success": "✅ Alert set for {mint} at ${price}",
+    "alert_list_empty": "No alerts set. Use `/alerts set <mint> <price>`",
+    "alert_list_header": "🔔 Your alerts:\n{alerts}",
+    "alert_invalid_price": "❌ Invalid price. Please use a number.",
+    "no_pairs_all_sources": "😕 No fresh pairs available from any source.\nTry `/token <mint>` instead.",
 }
 
 def T(key: str, **kwargs) -> str:
@@ -426,9 +435,10 @@ async def jupiter_price(session: aiohttp.ClientSession, mint: str) -> Optional[f
 async def fetch_latest_sol_pairs(limit: int = 8) -> List[Dict[str, Any]]:
     """
     Fetch fresh Solana pairs with fallback strategy:
-    1. Try /defi/v2/markets (sorted by liquidity)
-    2. If that fails or returns empty, try /defi/recently_added
-    3. Handle 403/429 errors gracefully
+    1. Try Birdeye /defi/v2/markets (sorted by liquidity)
+    2. If that fails or returns empty, try Birdeye /defi/recently_added
+    3. If both Birdeye endpoints fail, try DexScreener /latest/dex/tokens/solana
+    4. Deduplicate by mint, sort by pairCreatedAt, limit to 8 pairs
     """
     if (_scan_cache["ts"] + SCAN_CACHE_TTL) > time.time() and _scan_cache["pairs"]:
         return _scan_cache["pairs"][:limit]
@@ -552,7 +562,7 @@ async def fetch_latest_sol_pairs(limit: int = 8) -> List[Dict[str, Any]]:
         try:
             await api_rate_limit()
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as s:
-                async with s.get("https://api.dexscreener.com/latest/dex/pairs/solana") as r:
+                async with s.get("https://api.dexscreener.com/latest/dex/tokens/solana") as r:
                     if r.status == 200:
                         try:
                             j = await r.json()
@@ -694,6 +704,36 @@ async def birdeye_price(session: aiohttp.ClientSession, mint: str) -> Optional[f
     except Exception:
         return None
 
+async def dexscreener_token(session: aiohttp.ClientSession, mint: str) -> Optional[Dict[str, Any]]:
+    """Fetch token info from DexScreener as fallback"""
+    try:
+        await api_rate_limit(min_interval_sec=0.5)
+        url = f"https://api.dexscreener.com/latest/dex/tokens/{mint}"
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            if r.status != 200:
+                print(f"[DEXSCREENER] token HTTP {r.status} for {mint[:8]}...")
+                return None
+            j = await r.json()
+            if not j or not isinstance(j.get("pairs"), list) or len(j["pairs"]) == 0:
+                print(f"[DEXSCREENER] no pairs for {mint[:8]}...")
+                return None
+            pair = j["pairs"][0]
+            base_token = pair.get("baseToken", {})
+            return {
+                "symbol": base_token.get("symbol", ""),
+                "name": base_token.get("name", ""),
+                "address": mint,
+                "price": float(pair.get("priceUsd", 0)) if pair.get("priceUsd") else None,
+                "liquidity": float(pair.get("liquidity", {}).get("usd", 0)) if pair.get("liquidity") else None,
+                "fdv": float(pair.get("fdv", 0)) if pair.get("fdv") else None,
+                "marketCap": float(pair.get("marketCap", 0)) if pair.get("marketCap") else None,
+                "v24hUSD": float(pair.get("volume", {}).get("h24", 0)) if pair.get("volume") else None,
+                "pairCreatedAt": pair.get("pairCreatedAt"),
+            }
+    except Exception as e:
+        print(f"[DEXSCREENER] token exception for {mint[:8]}...: {e}")
+        return None
+
 async def birdeye_markets(session: aiohttp.ClientSession, mint: str) -> Optional[List[Dict[str, Any]]]:
     if not BIRDEYE_API_KEY:
         return None
@@ -783,53 +823,6 @@ def exchanges_block(markets: Optional[List[Dict[str, Any]]], is_pro: bool = Fals
     for dex, liq in top:
         lines.append(T("exchanges_item", dex=dex, liq=format_usd(liq)))
     return "\n".join(lines)
-
-def risk_flags(
-    liq_usd: Optional[float],
-    vol24: Optional[float],
-    lp_lock: Optional[float],
-    age_dt: Optional[datetime],
-    mint_active: bool,
-    freeze_active: bool,
-    top10_share: Optional[float]
-) -> List[str]:
-    """Comprehensive anti-rug risk flag detection"""
-    flags = []
-    
-    if liq_usd is not None and liq_usd < 10_000:
-        flags.append(T("risk_low_liquidity"))
-    
-    if vol24 is not None and vol24 < 5_000:
-        flags.append(T("risk_low_volume"))
-    
-    if lp_lock is not None:
-        try:
-            if float(lp_lock) < 20.0:
-                flags.append(T("risk_low_lp_lock"))
-        except Exception:
-            pass
-    
-    if age_dt:
-        try:
-            hrs = int((datetime.now(tz=timezone.utc) - age_dt).total_seconds() // 3600)
-            if hrs < 6:
-                flags.append(T("risk_new_token"))
-        except Exception:
-            pass
-    
-    if mint_active:
-        flags.append(T("risk_mint_authority"))
-    
-    if freeze_active:
-        flags.append(T("risk_freeze_authority"))
-    
-    try:
-        if top10_share is not None and top10_share >= 70.0:
-            flags.append(T("risk_top10_concentration", pct=f"{top10_share:.1f}"))
-    except Exception:
-        pass
-    
-    return flags
 
 def calc_risk_score(
     liquidity: Optional[float],
@@ -1266,9 +1259,9 @@ async def my_handler(m: Message):
     valid, msg = is_key_valid_for_product(key)
     tier = "PRO" if is_pro_user(user_id) else "Free"
     if valid:
-        await m.answer(f"✅ {msg}\nTier: {tier}", **MSG_KW)
+        await m.answer(T("my_status_valid", msg=msg, tier=tier), **MSG_KW)
     else:
-        await m.answer(f"⛔ {msg}", **MSG_KW)
+        await m.answer(T("my_status_invalid", msg=msg), **MSG_KW)
 
 @dp.message(Command("scan"))
 async def scan_handler(m: Message):
@@ -1306,7 +1299,7 @@ async def scan_handler(m: Message):
 
     if not pairs:
         log_command(user_id, "/scan", "", ok=False, err="no_pairs")
-        await status.edit_text(T("no_pairs"), **MSG_KW)
+        await status.edit_text(T("no_pairs_all_sources"), **MSG_KW)
         return
 
     _cleanup_scan_sessions()
@@ -1377,7 +1370,6 @@ async def token_handler(m: Message):
         security = None
         mkts = None
         birdeye_price_val = None
-        jupiter_price_val = None
         
         if BIRDEYE_API_KEY:
             results = await asyncio.gather(
@@ -1392,6 +1384,10 @@ async def token_handler(m: Message):
             mkts = results[2] if not isinstance(results[2], Exception) else None
             birdeye_price_val = results[3] if not isinstance(results[3], Exception) else None
         
+        if not extra:
+            print(f"[TOKEN] Birdeye failed, trying DexScreener for {mint[:8]}...")
+            extra = await dexscreener_token(session, mint)
+        
         if security and extra:
             extra.update(security)
         
@@ -1405,7 +1401,7 @@ async def token_handler(m: Message):
             "liquidity": {"usd": (extra or {}).get("liquidity")},
             "fdv": (extra or {}).get("mc") or (extra or {}).get("marketCap") or (extra or {}).get("fdv"),
             "volume": {"h24": (extra or {}).get("v24hUSD") or (extra or {}).get("v24h") or (extra or {}).get("volume24h")},
-            "pairCreatedAt": (extra or {}).get("createdAt") or (extra or {}).get("firstTradeAt") or (extra or {}).get("firstTradeUnixTime"),
+            "pairCreatedAt": (extra or {}).get("createdAt") or (extra or {}).get("firstTradeAt") or (extra or {}).get("firstTradeUnixTime") or (extra or {}).get("pairCreatedAt"),
             "chainId": "solana",
         }
 
@@ -1480,6 +1476,70 @@ async def alerts_handler(m: Message):
     if not key:
         await m.answer(T("no_access"), **MSG_KW)
         return
+    
+    args = (m.text or "").split()
+    if len(args) < 2:
+        conn = db()
+        cur = conn.execute("SELECT thresholds FROM alerts WHERE user_id = ?", (user_id,))
+        row = cur.fetchone()
+        conn.close()
+        
+        if not row or not row[0]:
+            await m.answer(T("alert_list_empty"), **MSG_KW)
+            return
+        
+        try:
+            thresholds = json.loads(row[0])
+            alert_lines = []
+            for mint, price in thresholds.items():
+                alert_lines.append(f"• `{mint[:8]}...` at ${price}")
+            await m.answer(T("alert_list_header", alerts="\n".join(alert_lines)), **MSG_KW)
+        except Exception as e:
+            print(f"[ALERTS] Parse error: {e}")
+            await m.answer(T("alert_list_empty"), **MSG_KW)
+        return
+    
+    sub = args[1].lower()
+    
+    if sub == "set":
+        if len(args) < 4:
+            await m.answer(T("alert_set_usage"), **MSG_KW)
+            return
+        
+        mint = normalize_mint_arg(args[2])
+        if not mint:
+            await m.answer(T("cant_detect_mint"), **MSG_KW)
+            return
+        
+        try:
+            price = float(args[3])
+        except ValueError:
+            await m.answer(T("alert_invalid_price"), **MSG_KW)
+            return
+        
+        conn = db()
+        cur = conn.execute("SELECT thresholds FROM alerts WHERE user_id = ?", (user_id,))
+        row = cur.fetchone()
+        
+        thresholds = {}
+        if row and row[0]:
+            try:
+                thresholds = json.loads(row[0])
+            except Exception:
+                thresholds = {}
+        
+        thresholds[mint] = price
+        ts = int(time.time())
+        conn.execute(
+            "INSERT OR REPLACE INTO alerts(user_id, thresholds, created_at) VALUES (?, ?, ?)",
+            (user_id, json.dumps(thresholds), ts)
+        )
+        conn.commit()
+        conn.close()
+        
+        await m.answer(T("alert_set_success", mint=mint[:8] + "...", price=price), **MSG_KW)
+        return
+    
     await m.answer(T("alerts_soon"), **MSG_KW)
 
 @dp.callback_query(F.data.startswith("token:"))
