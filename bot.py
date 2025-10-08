@@ -691,7 +691,7 @@ async def fetch_latest_sol_pairs(limit: int = 8) -> List[Dict[str, Any]]:
         try:
             await api_rate_limit()
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as s:
-                async with s.get("https://api.dexscreener.com/latest/dex/tokens/solana") as r:
+                async with s.get("https://api.dexscreener.com/latest/dex/pairs/solana") as r:
                     if r.status == 200:
                         try:
                             j = await r.json()
@@ -833,7 +833,7 @@ async def dexscreener_token(session: aiohttp.ClientSession, mint: str) -> Option
     """Fetch token info from DexScreener as fallback"""
     try:
         await api_rate_limit(min_interval_sec=0.5)
-        url = f"https://api.dexscreener.com/latest/dex/tokens/{mint}"
+        url = f"https://api.dexscreener.com/latest/dex/search?q={mint}"
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
             if r.status != 200:
                 print(f"[DEXSCREENER] token HTTP {r.status} for {mint[:8]}...")
@@ -1794,11 +1794,15 @@ async def fav_handler(m: Message):
         return
 
     args = (m.text or "").split()
-    if len(args) < 2:
+    
+    # Handle button taps
+    if m.text == "📜 My Favs":
+        sub = "list"
+    elif len(args) < 2:
         await m.answer(T("fav_usage"), **MSG_KW)
         return
-
-    sub = args[1].lower()
+    else:
+        sub = args[1].lower()
 
     if sub == "add":
         if len(args) >= 3:
@@ -1857,6 +1861,11 @@ async def alerts_handler(m: Message):
         return
     
     args = (m.text or "").split()
+    
+    # Handle button tap - show alert list
+    if m.text == "🔔 Alerts":
+        args = ["/alerts"]  # Treat as command with no subcommand
+    
     if len(args) < 2:
         conn = db()
         cur = conn.execute("SELECT thresholds FROM alerts WHERE user_id = ?", (user_id,))
@@ -2365,7 +2374,7 @@ async def text_input_handler(m: Message):
             await m.answer(text, reply_markup=kb, **MSG_KW)
         
         elapsed_ms = int((time.time() - start_time) * 1000)
-        log_command(user_id, "/token", mint, ok=True, latency_ms=elapsed_ms)
+        log_command(user_id, "/token", mint, ok=True, ms=elapsed_ms)
         return
     
     # Handle menu button taps by converting emoji labels to commands
@@ -2374,7 +2383,6 @@ async def text_input_handler(m: Message):
         _awaiting_fav_add[user_id] = False
         _awaiting_fav_del[user_id] = False
         _awaiting_alert_set.pop(user_id, None)
-        m.text = "/scan"
         await scan_handler(m)
         return
     elif text_input == "🎯 Find Token":
@@ -2386,7 +2394,6 @@ async def text_input_handler(m: Message):
         await m.answer(T("awaiting_mint"), **MSG_KW)
         return
     elif text_input == "📜 My Favs":
-        m.text = "/fav list"
         await fav_handler(m)
         return
     elif text_input == "❌ Remove Fav":
@@ -2394,19 +2401,15 @@ async def text_input_handler(m: Message):
         await m.answer(T("awaiting_mint"), **MSG_KW)
         return
     elif text_input == "🔔 Alerts":
-        m.text = "/alerts"
         await alerts_handler(m)
         return
     elif text_input == "🧾 My Tier":
-        m.text = "/my"
         await my_handler(m)
         return
     elif text_input == "❔ Help":
-        m.text = "/help"
         await help_handler(m)
         return
     elif text_input == "🚪 Logout":
-        m.text = "/logout"
         await logout_handler(m)
         return
     
