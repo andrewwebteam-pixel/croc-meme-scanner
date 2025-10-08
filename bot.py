@@ -1,101 +1,68 @@
+import re
 import asyncio
 import os
-import re
 import sqlite3
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Optional, List, Dict, Any
 
-import aiohttp
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import Command
-from aiogram.types import (CallbackQuery, InlineKeyboardButton,
-                           InlineKeyboardMarkup, Message)
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from dotenv import load_dotenv
+import aiohttp
+import base64
 
-"""
-Telegram bot for scanning newly listed Solana tokens and displaying
-token information.  This file is based on the original croc-meme-scanner
-project and includes minimal, targeted changes to implement
-requirements UI‑06, fallback for new pairs, a basic risk score and stub
-for alerts.  All user facing text is centralised in the STR
-dictionary and accessed through the helper function T().  No secrets
-are hard‑coded; values are read from environment variables.
-
-The following commands are implemented:
-  /start  – prompt for access key and save it
-  /help   – show help
-  /my     – display user key status
-  /logout – remove saved key
-  /token <mint> – fetch and display details for a token
-  /scan   – scan for new pairs on Birdeye (with fallback)
-  /fav add <mint> – add mint to favourites
-  /fav list        – list favourites
-  /alerts – display alerts settings (stub)
-
-Callback queries are used for toggling summary/details views,
-pagination through scan results and adding to favourites.
-
-Note: This file intentionally avoids using any privileged user
-information.  It uses only environment variables and local SQLite
-storage.  See README or project docs for further details.
-"""
-
-# === Configuration ===
+# === Config ===
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_KEY = os.getenv("ADMIN_KEY", "ADMIN-ROOT-ACCESS")
 DB_PATH = os.getenv("DB_PATH", "./keys.db")
 PRODUCT = os.getenv("PRODUCT", "meme_scanner")
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
-HELIUS_RPC_URL = os.getenv("HELIUS_RPC_URL", "").strip() or (
-    f"https://mainnet.helius-rpc.com/?api-key={os.getenv('HELIUS_API_KEY', '').strip()}"
-    if os.getenv("HELIUS_API_KEY")
-    else ""
-)
+SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "").strip()
+HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "").strip()
+HELIUS_RPC_URL = os.getenv("HELIUS_RPC_URL", "").strip() or (f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}" if HELIUS_API_KEY else "")
+
 SCAN_COOLDOWN_SEC = int(os.getenv("SCAN_COOLDOWN_SEC", "30"))
 SCAN_COOLDOWN_PRO_SEC = int(os.getenv("SCAN_COOLDOWN_PRO_SEC", "10"))
 
 assert BOT_TOKEN, "BOT_TOKEN is required"
 
-# === User-facing strings (UI‑06) ===
-# All messages and labels used in the bot must be defined here.  Do not
-# insert raw text inline; instead call T(key, **kwargs) which formats
-# the string and performs simple markdown escaping where needed.  This
-# centralisation makes it easy to translate or adjust copy in the
-# future.
-STR: Dict[str, str] = {
-    "no_access": "⛔️ No access. Please enter your key via /start.",
-    "access_invalid": "⛔️ Access invalid: {msg}\nSend a new key.",
-    "cooldown": "⏳ Please wait {remaining}s before using /scan again (anti‑spam).",
+BIRDEYE_BASE = "https://public-api.birdeye.so"
+
+# === User-facing strings (UI-06) ===
+STR = {
+    "no_access": "⛔ No access. Please enter your key via /start.",
+    "access_invalid": "⛔ Access invalid: {msg}\nSend a new key.",
+    "cooldown": "⏳ Please wait {remaining}s before using /scan again (anti-spam).",
     "no_pairs": (
-        "⚠️ No fresh pairs available via Birdeye on the current plan.\n"
+        "😕 No fresh pairs available via Birdeye on the current plan.\n"
         "Try `/token <mint>` or upgrade your data plan."
     ),
-    "scan_progress": "🔎 Scanning Solana pairs… ({i}/{n})",
+    "scan_progress": "🔍 Scanning Solana pairs… ({i}/{n})",
     "start": "Welcome to the {product} bot! Use /help to see commands.",
     "help": (
         "Commands:\n"
         "/token <mint> — get details on a token\n"
         "/scan — scan fresh pairs\n"
-        "/fav add <mint> — add token to favourites\n"
-        "/fav list — show your favourites\n"
+        "/fav add <mint> — add token to favorites\n"
+        "/fav list — show your favorites\n"
         "/my — show your subscription status\n"
         "/logout — remove your key\n"
-        "/alerts — manage price alerts (coming soon)\n"
         "/help — show this help"
     ),
     "logged_out": "✅ Your key has been removed. Goodbye!",
     "no_key": "You have no key saved. Use /start to enter a key.",
     "key_saved": "✅ Access key saved.",
-    "key_invalid": "⛔️ Invalid key.",
-    "token_not_found": "⛔️ Token not found. Please try again.",
+    "key_invalid": "⛔ Invalid key.",
+    "token_not_found": "⛔ Token not found. Please try again.",
     "bad_callback": "⚠️ Invalid action.",
-    "session_expired": "⌛️ Session expired. Run /scan again.",
+    "session_expired": "⌛ Session expired. Run /scan again.",
     "enter_key": "Please enter your access key:",
-    "no_active_access": "⛔️ No active access. Send your key or use /start.",
+    "no_active_access": "⛔ No active access. Send your key or use /start.",
     "key_unlinked": "✅ Key unlinked. Send a new key or /start.",
     "usage_token": "Usage: `/token <mint | birdeye/solscan link | SYMBOL (MINT)>`",
     "cant_detect_mint": "❌ Can't detect mint address. Send a Solana mint or a direct link to Birdeye/Solscan.",
@@ -103,65 +70,56 @@ STR: Dict[str, str] = {
     "no_data": "No data",
     "fav_usage": "Usage: `/fav add <mint>` or `/fav list`",
     "fav_add_usage": "Usage: `/fav add <mint>`",
-    "fav_added": "✅ {mint} added to favourites.",
-    "fav_empty": "Your favourites list is empty.",
-    "fav_list_header": "⭐ Your favourites:\n{favs}",
+    "fav_added": "✅ {mint} added to favorites.",
+    "fav_empty": "Your favorites list is empty.",
+    "fav_list_header": "⭐ Your favorites:\n{favs}",
     "unknown_subcommand": "Unknown subcommand. Use `/fav add <mint>` or `/fav list`",
     "key_accepted": "✅ Key accepted. {msg}\nYou can now use /scan",
-    "key_rejected": "⛔️ {msg}\nPlease try again.",
-    "fav_added_callback": "✅ Added to favourites: {mint}",
-    # Buttons
-    "btn_prev": "◀️ Prev",
-    "btn_next": "▶️ Next",
+    "key_rejected": "⛔ {msg}\nPlease try again.",
+    "fav_added_callback": "Added to favorites: {mint}",
+    "btn_prev": "◀ Prev",
+    "btn_next": "▶ Next",
     "btn_details": "ℹ️ Details",
-    "btn_back": "◀️ Back",
+    "btn_back": "◀ Back",
     "btn_birdeye": "Open on Birdeye",
     "btn_solscan": "Open on Solscan",
     "btn_buy": "Buy (Jupiter)",
-    "btn_fav_add": "⭐ Add to favourites",
-    "btn_share": "📤 Share",
-    # Card fields
-    "card_header": "*${symbol}* — {name}",
-    "card_price": "💲 Price: {price}",
-    "card_liquidity": "💧 Liquidity: {liq}",
-    "card_fdv": "🧱 FDV/MC: {fdv}",
-    "card_volume": "📊 Volume 24h: {vol}",
-    "card_age": "⏳ Age: {age}",
-    "card_holders": "👥 Holders: {holders}",
-    "card_holders_hidden": "👥 Holders: Hidden on Free plan",
-    "card_lp_locked": "🔒 LP Locked: {lp}%",
-    "card_lp_locked_hidden": "🔒 LP Locked: Hidden on Free plan",
+    "btn_fav_add": "⭐ Add to favorites",
+    "btn_share": "Share",
+    "card_price": "Price: {price}",
+    "card_liquidity": "Liquidity: {liq}",
+    "card_fdv": "FDV/MC: {fdv}",
+    "card_volume": "Volume 24h: {vol}",
+    "card_age": "Age: {age}",
+    "card_holders": "Holders: {holders}",
+    "card_holders_hidden": "Holders: Hidden on Free plan",
+    "card_lp_locked": "LP Locked: {lp}%",
+    "card_lp_locked_hidden": "LP Locked: Hidden on Free plan",
     "card_risk": "⚠️ Risk: {risks}",
-    "card_risk_score": "⚠️ Risk: {score}/100",
-    # Risk reasons
     "risk_low_liquidity": "Low liquidity",
     "risk_low_volume": "Low volume",
     "risk_low_lp_lock": "Low LP lock (<20%)",
     "risk_new_token": "New token (<6h)",
     "risk_mint_authority": "Mint authority active",
     "risk_freeze_authority": "Freeze authority active",
-    "risk_top10_concentration": "Top‑10 concentration {pct}%",
-    # Details section
-    "exchanges_header": "📈 Exchanges:",
-    "exchanges_empty": "📈 Exchanges: —",
+    "risk_top10_concentration": "Top-10 concentration {pct}%",
+    "exchanges_header": "Exchanges:",
+    "exchanges_empty": "Exchanges: —",
     "exchanges_item": "- {dex}: {liq} liquidity",
-    "exchanges_hidden": "📈 Exchanges: Hidden on Free plan",
-    "birdeye_header": "📊 Birdeye:",
-    "birdeye_empty": "📊 Birdeye: —",
+    "exchanges_hidden": "Exchanges: Hidden on Free plan",
+    "birdeye_header": "Birdeye:",
+    "birdeye_empty": "Birdeye: —",
     "birdeye_item": "- `{key}`: {value}",
     "details_mint_auth": "Mint authority: {auth}",
     "details_freeze_auth": "Freeze authority: {auth}",
-    "details_top10": "Top‑10 holders: {pct}",
-    "details_top10_hidden": "Top‑10 holders: Hidden on Free plan",
+    "details_top10": "Top-10 holders: {pct}",
+    "details_top10_hidden": "Top-10 holders: Hidden on Free plan",
     "details_plan_hint": "_Upgrade to PRO for full data access_",
     "authority_revoked": "revoked",
     "authority_active": "active ({short})",
-    # Alerts
-    "alerts_soon": "🔔 Alerts are coming soon. Stay tuned!",
-    "alerts_header": "🔔 Alerts settings:",
+    "card_header": "🐊 *${symbol}* — {name}",
     "unknown_token_name": "Unknown",
     "unknown_token_symbol": "?",
-    # Formatting helpers
     "fmt_dash": "—",
     "fmt_yes": "yes",
     "fmt_no": "no",
@@ -169,718 +127,1371 @@ STR: Dict[str, str] = {
     "fmt_million": "M",
     "fmt_kilo": "k",
     "fmt_hours": "h",
+    "fmt_days": "d",
 }
 
+def T(key: str, **kwargs) -> str:
+    return STR.get(key, key).format(**kwargs)
 
-def T(key: str, **kwargs: Any) -> str:
-    """Retrieve a user‑facing string and format it with kwargs.
+MSG_KW = dict(parse_mode="Markdown", disable_web_page_preview=True)
 
-    This helper ensures all user messages come from the STR dict and
-    allows consistent formatting.  It also performs a minimal escape
-    for curly braces to avoid accidental formatting issues.
-    """
-    if key not in STR:
-        # fallback: return the key itself to aid debugging
-        return key
-    text = STR[key]
-    # Replace any stray braces to avoid formatting crash
-    text = text.replace("{", "{ ").replace("}", " }")
-    try:
-        return text.format(**kwargs)
-    except Exception:
-        return text
+SCAN_CACHE_TTL = 15
+_scan_cache: Dict[str, Any] = {"ts": 0.0, "pairs": []}
 
+SCAN_SESSION_TTL = 300
+_scan_cache_sessions: Dict[str, Dict[str, Any]] = {}
 
-# === SQLite helper functions ===
-def init_db() -> sqlite3.Connection:
-    """Initialise SQLite database and ensure required tables exist."""
+def _new_sid() -> str:
+    return str(int(time.time()*1000)) + "-" + os.urandom(3).hex()
+
+def _cleanup_scan_sessions():
+    now = time.time()
+    for k in list(_scan_cache_sessions.keys()):
+        if _scan_cache_sessions[k].get("ts", 0) + SCAN_SESSION_TTL < now:
+            _scan_cache_sessions.pop(k, None)
+
+def scan_nav_kb(sid: str, idx: int, mint: str, mode: str = "summary") -> InlineKeyboardMarkup:
+    prev_idx = max(idx - 1, 0)
+    next_idx = idx + 1
+
+    row_nav = [
+        InlineKeyboardButton(text=T("btn_prev"), callback_data=f"scan:session:{sid}:idx:{prev_idx}"),
+        InlineKeyboardButton(text=T("btn_next"), callback_data=f"scan:session:{sid}:idx:{next_idx}"),
+    ]
+
+    row_toggle = (
+        [InlineKeyboardButton(text=T("btn_details"), callback_data=f"scan:session:{sid}:detail:{idx}")]
+        if mode == "summary"
+        else [InlineKeyboardButton(text=T("btn_back"), callback_data=f"scan:session:{sid}:idx:{idx}")]
+    )
+
+    be_link = f"https://birdeye.so/token/{mint}?chain=solana"
+    solscan_link = f"https://solscan.io/token/{mint}"
+    jup_link = f"https://jup.ag/swap?outputMint={mint}"
+
+    row_links1 = [InlineKeyboardButton(text=T("btn_birdeye"), url=be_link)]
+    row_links2 = [
+        InlineKeyboardButton(text=T("btn_solscan"), url=solscan_link),
+        InlineKeyboardButton(text=T("btn_buy"), url=jup_link),
+    ]
+    row_actions = [
+        InlineKeyboardButton(text=T("btn_fav_add"), callback_data=f"fav:add:{mint}"),
+        InlineKeyboardButton(text=T("btn_share"), switch_inline_query=mint),
+    ]
+
+    return InlineKeyboardMarkup(inline_keyboard=[row_nav, row_toggle, row_links1, row_links2, row_actions])
+
+_last_api_call_ts = 0.0
+_api_lock = asyncio.Lock()
+
+async def api_rate_limit(min_interval_sec: float = 1.1):
+    global _last_api_call_ts
+    async with _api_lock:
+        now = time.time()
+        wait = (_last_api_call_ts + min_interval_sec) - now
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _last_api_call_ts = time.time()
+
+def db():
     conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    # Access keys table: stores user_id and associated access key
-    cur.execute(
-        """
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS access_keys (
+            access_key TEXT PRIMARY KEY,
+            product TEXT NOT NULL,
+            expires_at TEXT NULL,
+            tier TEXT DEFAULT 'free'
+        )
+    """)
+    
+    try:
+        conn.execute("ALTER TABLE access_keys ADD COLUMN tier TEXT DEFAULT 'free'")
+        print("[DB] Added tier column to access_keys table")
+    except sqlite3.OperationalError:
+        pass
+    
+    try:
+        conn.execute("ALTER TABLE favorites ADD COLUMN added_at INTEGER NOT NULL DEFAULT 0")
+        print("[DB] Added added_at column to favorites table")
+    except sqlite3.OperationalError:
+        pass
+    
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_access (
             user_id INTEGER PRIMARY KEY,
             access_key TEXT NOT NULL,
-            created_at INTEGER NOT NULL
+            FOREIGN KEY(access_key) REFERENCES access_keys(access_key)
         )
-        """
-    )
-    # throttle table: rate limit /scan command
-    cur.execute(
-        """
+    """)
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS user_throttle (
             user_id INTEGER PRIMARY KEY,
-            next_allowed INTEGER NOT NULL
+            last_scan_ts INTEGER NOT NULL
         )
-        """
-    )
-    # favourites table
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS favourites (
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS favorites (
             user_id INTEGER NOT NULL,
             mint TEXT NOT NULL,
+            added_at INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (user_id, mint)
-        )
-        """
-    )
-    # alerts table (stub)
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS alerts (
-            user_id INTEGER NOT NULL,
-            thresholds TEXT,
-            allowlist TEXT,
-            blocklist TEXT,
-            created_at INTEGER NOT NULL,
-            PRIMARY KEY (user_id)
-        )
-        """
-    )
-    conn.commit()
+        );
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts INTEGER NOT NULL,
+            user_id INTEGER,
+            cmd TEXT NOT NULL,
+            args TEXT,
+            ok INTEGER NOT NULL,
+            ms INTEGER,
+            err TEXT
+        );
+    """)
     return conn
 
-
-def get_user_key(conn: sqlite3.Connection, user_id: int) -> Optional[str]:
-    cur = conn.cursor()
-    res = cur.execute(
-        "SELECT access_key FROM access_keys WHERE user_id = ?", (user_id,)
-    ).fetchone()
-    return res[0] if res else None
-
-
-def save_user_key(conn: sqlite3.Connection, user_id: int, key: str) -> None:
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT OR REPLACE INTO access_keys (user_id, access_key, created_at) VALUES (?, ?, ?)",
-        (user_id, key, int(time.time())),
-    )
+def seed_initial_keys():
+    conn = db()
+    conn.execute("INSERT OR REPLACE INTO access_keys (access_key, product, expires_at, tier) VALUES (?, ?, NULL, ?)", (ADMIN_KEY, PRODUCT, "pro"))
+    conn.execute("INSERT OR IGNORE INTO access_keys (access_key, product, expires_at, tier) VALUES (?, ?, ?, ?)", ("TEST-1234", PRODUCT, "2099-12-31", "free"))
+    print(f"[DB] {ADMIN_KEY} set to PRO tier")
     conn.commit()
+    conn.close()
 
+def key_info(access_key: str) -> Optional[tuple]:
+    conn = db()
+    cur = conn.execute("SELECT access_key, product, expires_at, tier FROM access_keys WHERE access_key = ?", (access_key,))
+    row = cur.fetchone()
+    conn.close()
+    return row
 
-def remove_user_key(conn: sqlite3.Connection, user_id: int) -> None:
-    cur = conn.cursor()
-    cur.execute("DELETE FROM access_keys WHERE user_id = ?", (user_id,))
+def bind_user(user_id: int, access_key: str):
+    conn = db()
+    conn.execute("INSERT OR REPLACE INTO user_access(user_id, access_key) VALUES (?, ?)", (user_id, access_key))
     conn.commit()
+    conn.close()
 
+def get_user_key(user_id: int) -> Optional[str]:
+    conn = db()
+    cur = conn.execute("SELECT access_key FROM user_access WHERE user_id = ?", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row[0] if row else None
 
-def get_user_throttle(conn: sqlite3.Connection, user_id: int) -> int:
-    cur = conn.cursor()
-    res = cur.execute(
-        "SELECT next_allowed FROM user_throttle WHERE user_id = ?", (user_id,)
-    ).fetchone()
-    return res[0] if res else 0
-
-
-def set_user_throttle(conn: sqlite3.Connection, user_id: int, next_allowed: int) -> None:
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT OR REPLACE INTO user_throttle (user_id, next_allowed) VALUES (?, ?)",
-        (user_id, next_allowed),
-    )
-    conn.commit()
-
-
-def add_favourite(conn: sqlite3.Connection, user_id: int, mint: str) -> None:
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT OR IGNORE INTO favourites (user_id, mint) VALUES (?, ?)",
-        (user_id, mint),
-    )
-    conn.commit()
-
-
-def list_favourites(conn: sqlite3.Connection, user_id: int) -> List[str]:
-    cur = conn.cursor()
-    rows = cur.execute(
-        "SELECT mint FROM favourites WHERE user_id = ? ORDER BY mint", (user_id,)
-    ).fetchall()
-    return [r[0] for r in rows]
-
-
-# === Risk calculation ===
-def calc_risk_score(
-    liquidity: Optional[float],
-    volume: Optional[float],
-    lp_lock_pct: Optional[float],
-    token_age_hours: float,
-    mint_auth_active: bool,
-    freeze_auth_active: bool,
-    top10_pct: Optional[float],
-) -> Tuple[int, List[str]]:
-    """Compute a simple risk score (0–100) and return associated reasons.
-
-    Lower score indicates higher risk.  Each factor contributes to the
-    total.  Reasons list contains human‑readable descriptions used in
-    details.
-    """
-    reasons: List[str] = []
-    score = 100
-    # Liquidity below 10k is considered risky
-    if liquidity is not None and liquidity < 10_000:
-        score -= 15
-        reasons.append(T("risk_low_liquidity"))
-    # Low 24h volume (<10k)
-    if volume is not None and volume < 10_000:
-        score -= 10
-        reasons.append(T("risk_low_volume"))
-    # LP locked less than 20% is risky
-    if lp_lock_pct is not None and lp_lock_pct < 20:
-        score -= 15
-        reasons.append(T("risk_low_lp_lock"))
-    # New token (<6h)
-    if token_age_hours < 6:
-        score -= 20
-        reasons.append(T("risk_new_token"))
-    # Mint authority active
-    if mint_auth_active:
-        score -= 15
-        reasons.append(T("risk_mint_authority"))
-    # Freeze authority active
-    if freeze_auth_active:
-        score -= 15
-        reasons.append(T("risk_freeze_authority"))
-    # High concentration: top10 > 50%
-    if top10_pct is not None and top10_pct > 50:
-        score -= 10
-        reasons.append(T("risk_top10_concentration", pct=f"{top10_pct:.0f}"))
-    # Clamp score to [0,100]
-    score = max(0, min(100, score))
-    return score, reasons
-
-
-# === Utility functions ===
-def fmt_number(n: Optional[float]) -> str:
-    """Format large numbers with currency suffixes and default dashes."""
-    if n is None:
-        return STR["fmt_dash"]
-    if n >= 1_000_000:
-        return f"{n/1_000_000:.2f}{STR['fmt_million']}"
-    if n >= 1_000:
-        return f"{n/1_000:.2f}{STR['fmt_kilo']}"
-    return f"{n:.2f}"
-
-
-def fmt_age(seconds: float) -> str:
-    """Return human friendly age like '5h' or '2d'."""
-    hours = seconds / 3600
-    if hours < 24:
-        return f"{hours:.1f}{STR['fmt_hours']}"
-    days = hours / 24
-    return f"{days:.1f}d"
-
-
-def shorten(text: str) -> str:
-    return text[:4] + "…" + text[-4:] if len(text) > 10 else text
-
-
-async def fetch_json(session: aiohttp.ClientSession, url: str, headers: Dict[str, str] = None) -> Any:
-    """Fetch JSON from URL with timeout and handle errors gracefully."""
+def log_command(user_id: int, cmd: str, args: str = "", ok: bool = True, ms: int = 0, err: str = ""):
+    """Log command execution to database (non-blocking)"""
     try:
-        async with session.get(url, headers=headers, timeout=10) as resp:
-            if resp.status != 200:
-                return None
-            return await resp.json()
+        conn = sqlite3.connect(DB_PATH)
+        ts = int(time.time())
+        conn.execute(
+            "INSERT INTO logs(ts, user_id, cmd, args, ok, ms, err) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (ts, user_id, cmd, args, 1 if ok else 0, ms, err)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[LOG] Failed to log command: {e}")
+
+def is_key_valid_for_product(access_key: str) -> tuple[bool, str]:
+    info = key_info(access_key)
+    if not info:
+        return False, "Invalid key."
+    _, product, expires_at, _ = info
+    if product != PRODUCT:
+        return False, "This key is for a different product."
+    if expires_at is None:
+        return True, "Lifetime access (admin/NFT)."
+    try:
+        if datetime.utcnow().date() <= datetime.fromisoformat(expires_at).date():
+            return True, f"Access valid until {expires_at}."
+        else:
+            return False, "Key has expired."
+    except Exception:
+        return False, "Invalid key expiry format."
+
+def is_pro_user(user_id: int) -> bool:
+    """Check if user has PRO tier access"""
+    key = get_user_key(user_id)
+    if not key:
+        return False
+    info = key_info(key)
+    if not info:
+        return False
+    tier = info[3] if len(info) > 3 else "free"
+    return tier == "pro"
+
+def add_favorite(user_id: int, mint: str):
+    with sqlite3.connect(DB_PATH) as conn:
+        ts = int(time.time())
+        conn.execute(
+            "INSERT OR REPLACE INTO favorites(user_id, mint, added_at) VALUES (?, ?, ?)",
+            (user_id, mint, ts),
+        )
+
+def list_favorites(user_id: int) -> list[str]:
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            "SELECT mint FROM favorites WHERE user_id = ? ORDER BY added_at DESC",
+            (user_id,),
+        ).fetchall()
+    return [row[0] for row in rows]
+
+def get_last_scan_ts(user_id: int) -> int:
+    conn = db()
+    cur = conn.execute("SELECT last_scan_ts FROM user_throttle WHERE user_id = ?", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    return int(row[0]) if row else 0
+
+def set_last_scan_ts(user_id: int, ts: int):
+    conn = db()
+    conn.execute("INSERT OR REPLACE INTO user_throttle(user_id, last_scan_ts) VALUES (?, ?)", (user_id, ts))
+    conn.commit()
+    conn.close()
+
+def format_usd(v: Optional[float]) -> str:
+    if v is None:
+        return T("fmt_dash")
+    try:
+        v = float(v)
+    except Exception:
+        return T("fmt_dash")
+    curr = T("fmt_currency")
+    if v >= 1_000_000: return f"{curr}{v/1_000_000:.2f}{T('fmt_million')}"
+    if v >= 1_000:     return f"{curr}{v/1_000:.2f}{T('fmt_kilo')}"
+    if v >= 1:         return f"{curr}{v:.2f}"
+    return f"{curr}{v:.6f}"
+
+def from_unix_ms(ms: Optional[int]) -> Optional[datetime]:
+    if not ms: return None
+    ts = float(ms)
+    if ts > 10_000_000_000:
+        ts = ts / 1000.0
+    try:
+        return datetime.fromtimestamp(ts, tz=timezone.utc)
     except Exception:
         return None
 
+def human_age(dt: Optional[datetime]) -> str:
+    if not dt: return T("fmt_dash")
+    delta = datetime.now(tz=timezone.utc) - dt
+    hours = int(delta.total_seconds() // 3600)
+    if hours < 24: return f"{hours}{T('fmt_hours')}"
+    days = hours // 24
+    return f"{days}{T('fmt_days')}"
 
-async def fetch_birdeye_price(session: aiohttp.ClientSession, mint: str) -> Optional[float]:
-    """Return Birdeye price for a token (USD)."""
-    if not BIRDEYE_API_KEY:
+_mint_re = re.compile(r"[1-9A-HJ-NP-Za-km-z]{32,44}")
+
+def normalize_mint_arg(raw: str) -> Optional[str]:
+    s = (raw or "").strip()
+    if not s:
         return None
-    url = f"https://public-api.birdeye.so/public/price?address={mint}&apikey={BIRDEYE_API_KEY}"
-    data = await fetch_json(session, url)
-    if data and isinstance(data.get("data"), dict):
-        return data["data"].get("value")
-    return None
+    m = re.search(r"/token/([1-9A-HJ-NP-Za-km-z]{32,44})", s)
+    if m:
+        return m.group(1)
+    m = re.search(r"\(([1-9A-HJ-NP-Za-km-z]{32,44})\)", s)
+    if m:
+        return m.group(1)
+    m = _mint_re.search(s)
+    return m.group(0) if m else None
 
+async def jupiter_price(session: aiohttp.ClientSession, mint: str) -> Optional[float]:
+    try:
+        url = "https://price.jup.ag/v6/price"
+        params = {"ids": mint}
+        async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            if r.status != 200:
+                return None
+            j = await r.json()
+            data = (j or {}).get("data") or {}
+            rec = data.get(mint) or {}
+            price = rec.get("price")
+            if price is None:
+                return None
+            return float(price)
+    except Exception:
+        return None
 
-async def fetch_birdeye_overview(session: aiohttp.ClientSession, mint: str) -> Dict[str, Any]:
-    """Fetch Birdeye overview for a token including liquidity, volume and fdv."""
+async def fetch_latest_sol_pairs(limit: int = 8) -> List[Dict[str, Any]]:
+    """
+    Fetch fresh Solana pairs with fallback strategy:
+    1. Try /defi/v2/markets (sorted by liquidity)
+    2. If that fails or returns empty, try /defi/recently_added
+    3. Handle 403/429 errors gracefully
+    """
+    if (_scan_cache["ts"] + SCAN_CACHE_TTL) > time.time() and _scan_cache["pairs"]:
+        return _scan_cache["pairs"][:limit]
+
     if not BIRDEYE_API_KEY:
-        return {}
-    url = f"https://public-api.birdeye.so/public/token/overview?address={mint}&apikey={BIRDEYE_API_KEY}"
-    data = await fetch_json(session, url)
-    return data.get("data", {}) if data else {}
-
-
-async def fetch_birdeye_pairs(session: aiohttp.ClientSession) -> List[Dict[str, Any]]:
-    """Fetch latest pairs from Birdeye.  Returns list of dicts with mint and timestamp."""
-    if not BIRDEYE_API_KEY:
+        print("[SCAN] Birdeye: BIRDEYE_API_KEY is empty -> returning []")
         return []
-    url = f"https://public-api.birdeye.so/public/pair/solana/recent?apikey={BIRDEYE_API_KEY}"
-    data = await fetch_json(session, url)
-    pairs: List[Dict[str, Any]] = []
-    if data and isinstance(data.get("data"), list):
-        for item in data["data"]:
-            mint = item.get("token_address") or item.get("pair_token")
-            timestamp = item.get("created_at") or item.get("tx_time")
-            if mint and timestamp:
-                pairs.append({"mint": mint, "timestamp": timestamp})
-    return pairs
 
-
-async def fetch_fallback_pairs(session: aiohttp.ClientSession) -> List[Dict[str, Any]]:
-    """Fallback: fetch latest SOL pairs from DexScreener public API.
-
-    DexScreener provides an unauthenticated endpoint that lists new pairs.
-    We sort them by creation time and return up to 8 entries.  If the API
-    is unreachable, returns empty list.
-    """
-    url = "https://api.dexscreener.com/latest/dex/pairs/solana"
-    data = await fetch_json(session, url)
-    pairs: List[Dict[str, Any]] = []
-    if data and isinstance(data.get("pairs"), list):
-        for p in data["pairs"]:
-            mint = p.get("baseToken", {}).get("address")
-            t = p.get("pairCreatedAt")
-            if mint and t:
-                try:
-                    # DexScreener returns ms epoch
-                    ts = int(t) / 1000
-                except Exception:
-                    continue
-                pairs.append({"mint": mint, "timestamp": ts})
-    # Deduplicate by mint and sort descending by timestamp
-    seen = set()
-    unique: List[Dict[str, Any]] = []
-    for item in sorted(pairs, key=lambda x: x["timestamp"], reverse=True):
-        m = item["mint"]
-        if m not in seen:
-            seen.add(m)
-            unique.append(item)
-        if len(unique) >= 8:
-            break
-    return unique
-
-
-async def fetch_latest_pairs() -> List[str]:
-    """Return a list of mint addresses for the newest pairs.
-
-    Primary source is Birdeye.  If Birdeye returns no data, fall back
-    to DexScreener.  Only the first 8 unique mints are returned.
-    """
-    async with aiohttp.ClientSession() as session:
-        birdeye_pairs = await fetch_birdeye_pairs(session)
-        if birdeye_pairs:
-            # Sort by timestamp descending, deduplicate and take first 8
-            seen: set[str] = set()
-            mints: List[str] = []
-            for item in sorted(birdeye_pairs, key=lambda x: x["timestamp"], reverse=True):
-                m = item["mint"]
-                if m not in seen:
-                    seen.add(m)
-                    mints.append(m)
-                if len(mints) >= 8:
-                    break
-            return mints
-        # Fallback
-        fallback_pairs = await fetch_fallback_pairs(session)
-        return [p["mint"] for p in fallback_pairs]
-
-
-async def fetch_token_info(mint: str) -> Dict[str, Any]:
-    """Aggregate token information from various sources.
-
-    This function calls Birdeye for price and overview, calculates a
-    risk score and returns a dict with fields used in summary/details.
-    Inaccessible or missing values are replaced with None.
-    """
-    async with aiohttp.ClientSession() as session:
-        price = await fetch_birdeye_price(session, mint)
-        overview = await fetch_birdeye_overview(session, mint)
-    liq = overview.get("liquidity", {}).get("usd") if overview else None
-    volume = overview.get("volume_24h", {}).get("usd") if overview else None
-    fdv = overview.get("fdv") if overview else None
-    holders = overview.get("holders") if overview else None
-    lp_lock_pct = overview.get("lp_lock_percentage") if overview else None
-    # Determine age from created_at field if available
-    created = overview.get("created_at") if overview else None
-    if created:
-        try:
-            if isinstance(created, str):
-            # try parse iso date
-                ts = datetime.fromisoformat(created.rstrip("Z")).timestamp()
-            else:
-                ts = float(created)
-            age_seconds = time.time() - ts
-        except Exception:
-            age_seconds = 0.0
-    else:
-        age_seconds = 0.0
-    age_hours = age_seconds / 3600
-    # Determine authorities from Helius RPC if available
-    mint_auth_active = False
-    freeze_auth_active = False
-    top10_pct = None
-    # We deliberately avoid onchain calls in this minimal implementation.
-    # In production, call HELIUS RPC or another RPC to fetch account info.
-    # For now, authorities remain False and top10_pct None.
-    score, reasons = calc_risk_score(
-        liquidity=liq,
-        volume=volume,
-        lp_lock_pct=lp_lock_pct,
-        token_age_hours=age_hours,
-        mint_auth_active=mint_auth_active,
-        freeze_auth_active=freeze_auth_active,
-        top10_pct=top10_pct,
-    )
-    return {
-        "mint": mint,
-        "price": price,
-        "liquidity": liq,
-        "fdv": fdv,
-        "volume": volume,
-        "holders": holders,
-        "lp_lock_pct": lp_lock_pct,
-        "age_hours": age_hours,
-        "mint_auth_active": mint_auth_active,
-        "freeze_auth_active": freeze_auth_active,
-        "top10_pct": top10_pct,
-        "risk_score": score,
-        "risk_reasons": reasons,
-        "name": None,
-        "symbol": None,
-        "birdeye": overview,
+    headers = {
+        "accept": "application/json",
+        "X-API-KEY": BIRDEYE_API_KEY,
+        "x-chain": "solana"
     }
 
-
-# === Keyboard builders ===
-def build_card_keyboard(
-    mint: str,
-    session_id: str,
-    index: int,
-    total: int,
-    showing_details: bool = False,
-) -> InlineKeyboardMarkup:
-    """Construct keyboard for a card (summary or details view)."""
-    buttons = []
-    # Details/back toggle
-    if showing_details:
-        buttons.append([
-            InlineKeyboardButton(
-                text=T("btn_back"),
-                callback_data=f"token:{mint}:summary:{session_id}:{index}",
-            )
-        ])
-    else:
-        buttons.append([
-            InlineKeyboardButton(
-                text=T("btn_details"),
-                callback_data=f"token:{mint}:details:{session_id}:{index}",
-            )
-        ])
-    # External links row
-    buttons.append([
-        InlineKeyboardButton(text=T("btn_birdeye"), url=f"https://birdeye.so/token/{mint}"),
-        InlineKeyboardButton(text=T("btn_solscan"), url=f"https://solscan.io/token/{mint}"),
-    ])
-    # Buy/share row
-    buttons.append([
-        InlineKeyboardButton(
-            text=T("btn_buy"),
-            url=f"https://jup.ag/swap/SOL-{mint}",
-        ),
-        InlineKeyboardButton(
-            text=T("btn_share"),
-            switch_inline_query= mint,
-        ),
-    ])
-    # Favourite row
-    buttons.append([
-        InlineKeyboardButton(
-            text=T("btn_fav_add"),
-            callback_data=f"fav:{mint}",
-        )
-    ])
-    # Prev/Next row if multiple
-    nav_row: List[InlineKeyboardButton] = []
-    if index > 0:
-        nav_row.append(
-            InlineKeyboardButton(
-                text=T("btn_prev"),
-                callback_data=f"scan:{session_id}:{index-1}",
-            )
-        )
-    if index < total - 1:
-        nav_row.append(
-            InlineKeyboardButton(
-                text=T("btn_next"),
-                callback_data=f"scan:{session_id}:{index+1}",
-            )
-        )
-    if nav_row:
-        buttons.append(nav_row)
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-
-# === Card builders ===
-def build_summary_text(info: Dict[str, Any]) -> str:
-    """Build summary card text from token info."""
-    symbol = info.get("symbol") or STR["unknown_token_symbol"]
-    name = info.get("name") or STR["unknown_token_name"]
-    header = T("card_header", symbol=symbol, name=name)
-    price = fmt_number(info.get("price"))
-    liq = fmt_number(info.get("liquidity"))
-    fdv = fmt_number(info.get("fdv"))
-    vol = fmt_number(info.get("volume"))
-    age = fmt_age(info.get("age_hours", 0) * 3600)
-    holders = (
-        str(info.get("holders")) if info.get("holders") is not None else STR["fmt_dash"]
-    )
-    lp = (
-        f"{info.get('lp_lock_pct'):.1f}" if info.get("lp_lock_pct") is not None else STR["fmt_dash"]
-    )
-    # Risk: show numeric score and join reasons if high risk
-    score = info.get("risk_score", 0)
-    risks = ", ".join(info.get("risk_reasons") or []) or "—"
-    body = [
-        T("card_price", price=price),
-        T("card_liquidity", liq=liq),
-        T("card_fdv", fdv=fdv),
-        T("card_volume", vol=vol),
-        T("card_age", age=age),
-        T("card_holders", holders=holders),
-        T("card_lp_locked", lp=lp),
-        T("card_risk_score", score=score),
-    ]
-    return "\n".join([header] + body)
-
-
-def build_details_text(info: Dict[str, Any]) -> str:
-    """Build detailed card text including exchanges and Birdeye info."""
-    parts: List[str] = []
-    # Authorities
-    mint_auth = STR["authority_active"] if info.get("mint_auth_active") else STR["authority_revoked"]
-    freeze_auth = STR["authority_active"] if info.get("freeze_auth_active") else STR["authority_revoked"]
-    parts.append(T("details_mint_auth", auth=mint_auth))
-    parts.append(T("details_freeze_auth", auth=freeze_auth))
-    if info.get("top10_pct") is not None:
-        parts.append(T("details_top10", pct=f"{info['top10_pct']:.1f}%"))
-    else:
-        parts.append(T("details_top10_hidden"))
-    # Risk reasons list
-    if info.get("risk_reasons"):
-        reasons_list = [f"- {reason}" for reason in info["risk_reasons"]]
-        parts.append("\n".join(["\n*Why:*", *reasons_list]))
-    # Birdeye details
-    overview = info.get("birdeye") or {}
-    if overview:
-        parts.append(T("birdeye_header"))
-        for k, v in overview.items():
-            # Show only scalar values for brevity
-            if isinstance(v, (str, int, float)):
-                parts.append(T("birdeye_item", key=k, value=v))
-    return "\n".join(parts)
-
-
-# === Global scan sessions ===
-scan_sessions: Dict[str, List[str]] = {}
-
-
-# === Command handlers ===
-async def cmd_start(message: Message, conn: sqlite3.Connection) -> None:
-    await message.answer(T("start", product=PRODUCT))
-    await message.answer(T("enter_key"))
-
-
-async def cmd_help(message: Message) -> None:
-    await message.answer(T("help"))
-
-
-async def cmd_my(message: Message, conn: sqlite3.Connection) -> None:
-    key = get_user_key(conn, message.from_user.id)
-    if not key:
-        await message.answer(T("no_key"))
-    else:
-        await message.answer(f"Your key: `{key}`")
-
-
-async def cmd_logout(message: Message, conn: sqlite3.Connection) -> None:
-    remove_user_key(conn, message.from_user.id)
-    await message.answer(T("logged_out"))
-
-
-async def cmd_token(message: Message, conn: sqlite3.Connection) -> None:
-    args = message.get_args().strip().split()
-    if not args:
-        await message.answer(T("usage_token"), parse_mode=ParseMode.MARKDOWN)
-        return
-    mint = args[0].strip()
-    # Attempt to extract mint from common URL formats
-    m = re.search(r"([1-9A-HJ-NP-Za-km-z]{32,44})", mint)
-    if m:
-        mint = m.group(1)
-    else:
-        await message.answer(T("cant_detect_mint"))
-        return
-    await message.answer(T("fetching_data", mint=mint))
-    info = await fetch_token_info(mint)
-    if not info:
-        await message.answer(T("token_not_found"))
-        return
-    session_id = str(int(time.time() * 1000))
-    scan_sessions[session_id] = [mint]
-    text = build_summary_text(info)
-    kb = build_card_keyboard(mint, session_id, 0, 1, showing_details=False)
-    await message.answer(text, reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
-
-
-async def cmd_scan(message: Message, conn: sqlite3.Connection) -> None:
-    # Check access key
-    key = get_user_key(conn, message.from_user.id)
-    if not key:
-        await message.answer(T("no_active_access"))
-        return
-    # Throttle
-    now = int(time.time())
-    next_allowed = get_user_throttle(conn, message.from_user.id)
-    cooldown = SCAN_COOLDOWN_SEC
-    if now < next_allowed:
-        await message.answer(T("cooldown", remaining=next_allowed - now))
-        return
-    set_user_throttle(conn, message.from_user.id, now + cooldown)
-    # Fetch mints
-    mints = await fetch_latest_pairs()
-    if not mints:
-        await message.answer(T("no_pairs"))
-        return
-    # Progress message
-    progress = await message.answer(T("scan_progress", i=0, n=len(mints)))
-    infos: List[Dict[str, Any]] = []
-    for i, mint in enumerate(mints):
-        await progress.edit_text(T("scan_progress", i=i + 1, n=len(mints)))
-        info = await fetch_token_info(mint)
-        if info:
-            infos.append(info)
-    await progress.delete()
-    # Cache session
-    session_id = str(int(time.time() * 1000))
-    scan_sessions[session_id] = [info["mint"] for info in infos]
-    # Show first card
-    if infos:
-        first = infos[0]
-        text = build_summary_text(first)
-        kb = build_card_keyboard(first["mint"], session_id, 0, len(infos), False)
-        await message.answer(text, reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
-    else:
-        await message.answer(T("no_pairs"))
-
-
-async def cmd_fav(message: Message, conn: sqlite3.Connection) -> None:
-    args = message.get_args().split()
-    if not args:
-        await message.answer(T("fav_usage"))
-        return
-    sub = args[0].lower()
-    if sub == "add":
-        if len(args) < 2:
-            await message.answer(T("fav_add_usage"))
-            return
-        mint = args[1].strip()
-        m = re.search(r"([1-9A-HJ-NP-Za-km-z]{32,44})", mint)
-        if not m:
-            await message.answer(T("cant_detect_mint"))
-            return
-        mint = m.group(1)
-        add_favourite(conn, message.from_user.id, mint)
-        await message.answer(T("fav_added", mint=mint))
-    elif sub == "list":
-        favs = list_favourites(conn, message.from_user.id)
-        if not favs:
-            await message.answer(T("fav_empty"))
-        else:
-            fav_lines = [f"`{m}`" for m in favs]
-            await message.answer(T("fav_list_header", favs="\n".join(fav_lines)), parse_mode=ParseMode.MARKDOWN)
-    else:
-        await message.answer(T("unknown_subcommand"))
-
-
-async def cmd_alerts(message: Message) -> None:
-    # Currently stubbed
-    await message.answer(T("alerts_soon"))
-
-
-# === Callback query handlers ===
-async def on_callback(query: CallbackQuery, conn: sqlite3.Connection) -> None:
-    data = query.data or ""
+    pairs = []
+    
+    url_markets = f"{BIRDEYE_BASE}/defi/v2/markets"
+    params_markets = {"sort_by": "liquidity", "sort_type": "desc", "offset": 0, "limit": 50}
+    
     try:
-        parts = data.split(":")
+        await api_rate_limit()
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
+            async with s.get(url_markets, headers=headers, params=params_markets) as r:
+                status = r.status
+                if status == 403:
+                    print("[SCAN] /defi/v2/markets returned 403 (plan limit) - falling back to recently_added")
+                elif status == 429:
+                    print("[SCAN] /defi/v2/markets returned 429 (rate limit) - falling back to recently_added")
+                elif status == 200:
+                    try:
+                        j = await r.json()
+                        if j and j.get("success"):
+                            data = j.get("data") or {}
+                            items = data.get("items") if isinstance(data, dict) else data
+                            if items and isinstance(items, list):
+                                for m in items[:50]:
+                                    try:
+                                        base = {
+                                            "symbol": m.get("symbol") or "",
+                                            "name": m.get("name") or "",
+                                            "address": m.get("address") or m.get("baseAddress") or ""
+                                        }
+                                        pairs.append({
+                                            "baseToken": base,
+                                            "priceUsd": m.get("price"),
+                                            "liquidity": {"usd": m.get("liquidity") or m.get("liquidityUsd")},
+                                            "fdv": m.get("marketCap") or m.get("fdv"),
+                                            "volume": {"h24": m.get("v24hUSD") or m.get("v24h") or m.get("volume24h")},
+                                            "pairCreatedAt": m.get("createdAt") or m.get("firstTradeAt"),
+                                            "chainId": "solana",
+                                        })
+                                    except Exception as e:
+                                        print(f"[SCAN] pair build error: {e}")
+                                        continue
+                                print(f"[SCAN] /defi/v2/markets returned {len(pairs)} pairs")
+                        else:
+                            print(f"[SCAN] /defi/v2/markets success==false: {str(j)[:200]}")
+                    except Exception as e:
+                        print(f"[SCAN] /defi/v2/markets parse error: {e}")
+                else:
+                    try:
+                        txt = await r.text()
+                    except Exception:
+                        txt = "<no body>"
+                    print(f"[SCAN] /defi/v2/markets HTTP {status} -> {txt[:200]}")
+    except Exception as e:
+        print(f"[SCAN] /defi/v2/markets exception: {e}")
+    
+    if not pairs:
+        print("[SCAN] Trying fallback: /defi/recently_added")
+        url_recent = f"{BIRDEYE_BASE}/defi/recently_added"
+        params_recent = {"chain": "solana", "limit": 20}
+        
+        try:
+            await api_rate_limit()
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
+                async with s.get(url_recent, headers=headers, params=params_recent) as r:
+                    if r.status == 200:
+                        try:
+                            j = await r.json()
+                            if j and j.get("success"):
+                                data = j.get("data") or {}
+                                items = data.get("items") if isinstance(data, dict) else (data if isinstance(data, list) else [])
+                                for token in (items or []):
+                                    try:
+                                        mint = token.get("address") or token.get("mint") or ""
+                                        if not mint:
+                                            continue
+                                        base = {
+                                            "symbol": token.get("symbol") or "",
+                                            "name": token.get("name") or "",
+                                            "address": mint
+                                        }
+                                        pairs.append({
+                                            "baseToken": base,
+                                            "priceUsd": token.get("price"),
+                                            "liquidity": {"usd": token.get("liquidity")},
+                                            "fdv": token.get("mc") or token.get("marketCap"),
+                                            "volume": {"h24": token.get("v24hUSD") or token.get("v24h")},
+                                            "pairCreatedAt": token.get("createdAt") or token.get("firstTradeUnixTime"),
+                                            "chainId": "solana",
+                                        })
+                                    except Exception as e:
+                                        print(f"[SCAN] recently_added build error: {e}")
+                                        continue
+                                print(f"[SCAN] /defi/recently_added returned {len(pairs)} pairs")
+                            else:
+                                print(f"[SCAN] /defi/recently_added success==false: {str(j)[:200]}")
+                        except Exception as e:
+                            print(f"[SCAN] /defi/recently_added parse error: {e}")
+                    else:
+                        try:
+                            txt = await r.text()
+                        except Exception:
+                            txt = "<no body>"
+                        print(f"[SCAN] /defi/recently_added HTTP {r.status} -> {txt[:200]}")
+        except Exception as e:
+            print(f"[SCAN] /defi/recently_added exception: {e}")
+    
+    if pairs:
+        _scan_cache["ts"] = time.time()
+        _scan_cache["pairs"] = pairs
+        print(f"[SCAN] Successfully cached {len(pairs)} pairs")
+        return pairs[:limit]
+    
+    return []
+
+async def birdeye_overview(session: aiohttp.ClientSession, mint: str) -> Optional[Dict[str, Any]]:
+    if not BIRDEYE_API_KEY:
+        return None
+    url = f"{BIRDEYE_BASE}/defi/token_overview"
+    headers = {
+        "accept": "application/json",
+        "X-API-KEY": BIRDEYE_API_KEY,
+        "x-chain": "solana"
+    }
+    params = {"address": mint}
+    try:
+        await api_rate_limit()
+        async with session.get(url, headers=headers, params=params, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            if r.status == 403:
+                print(f"[BIRDEYE] token_overview 403 (plan limit) for {mint[:8]}...")
+                return None
+            if r.status == 429:
+                print(f"[BIRDEYE] token_overview 429 (rate limit) for {mint[:8]}...")
+                return None
+            if r.status != 200:
+                try:
+                    txt = await r.text()
+                except Exception:
+                    txt = "<no body>"
+                print(f"[BIRDEYE] token_overview HTTP {r.status} for {mint[:8]}... -> {txt[:200]}")
+                return None
+            j = await r.json()
+            if not j or not j.get("success"):
+                print(f"[BIRDEYE] token_overview failed for {mint[:8]}...: {str(j)[:200]}")
+                return None
+            return j.get("data") or j
+    except Exception as e:
+        print(f"[BIRDEYE] token_overview exception for {mint[:8]}...: {e}")
+        return None
+
+async def birdeye_token_security(session: aiohttp.ClientSession, mint: str) -> Optional[Dict[str, Any]]:
+    """Fetch token security info (mint authority, freeze authority, etc.)"""
+    if not BIRDEYE_API_KEY:
+        return None
+    url = f"{BIRDEYE_BASE}/defi/token_security"
+    headers = {
+        "accept": "application/json",
+        "X-API-KEY": BIRDEYE_API_KEY,
+        "x-chain": "solana"
+    }
+    params = {"address": mint}
+    try:
+        await api_rate_limit()
+        async with session.get(url, headers=headers, params=params, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            if r.status == 200:
+                j = await r.json()
+                if j and j.get("success"):
+                    return j.get("data")
+            else:
+                print(f"[BIRDEYE] token_security HTTP {r.status} for {mint[:8]}...")
+            return None
+    except Exception as e:
+        print(f"[BIRDEYE] token_security exception for {mint[:8]}...: {e}")
+        return None
+
+async def birdeye_price(session: aiohttp.ClientSession, mint: str) -> Optional[float]:
+    """Fetch live price from Birdeye"""
+    if not BIRDEYE_API_KEY:
+        return None
+    url = f"{BIRDEYE_BASE}/defi/price"
+    headers = {
+        "accept": "application/json",
+        "X-API-KEY": BIRDEYE_API_KEY,
+        "x-chain": "solana"
+    }
+    params = {"address": mint}
+    try:
+        await api_rate_limit()
+        async with session.get(url, headers=headers, params=params, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            if r.status == 200:
+                j = await r.json()
+                if j and j.get("success"):
+                    data = j.get("data") or {}
+                    price = data.get("value")
+                    if price is not None:
+                        return float(price)
+            return None
     except Exception:
-        await query.answer(T("bad_callback"))
-        return
-    # Add to favourites
-    if parts[0] == "fav" and len(parts) == 2:
-        mint = parts[1]
-        add_favourite(conn, query.from_user.id, mint)
-        await query.answer(T("fav_added_callback", mint=mint))
-        return
-    # Token details toggling
-    if parts[0] == "token" and len(parts) >= 4:
-        mint, action, session_id, index_str = parts[1], parts[2], parts[3], parts[4] if len(parts) > 4 else "0"
-        index = int(index_str)
-        mints = scan_sessions.get(session_id)
-        if not mints or index < 0 or index >= len(mints):
-            await query.answer(T("session_expired"))
-            return
-        mint = mints[index]
-        info = await fetch_token_info(mint)
-        if not info:
-            await query.answer(T("token_not_found"))
-            return
-        if action == "details":
-            text = build_details_text(info)
-            kb = build_card_keyboard(mint, session_id, index, len(mints), showing_details=True)
+        return None
+
+async def birdeye_markets(session: aiohttp.ClientSession, mint: str) -> Optional[List[Dict[str, Any]]]:
+    if not BIRDEYE_API_KEY:
+        return None
+    url = f"{BIRDEYE_BASE}/defi/v2/markets"
+    headers = {
+        "accept": "application/json",
+        "X-API-KEY": BIRDEYE_API_KEY,
+        "x-chain": "solana"
+    }
+    params = {"address": mint, "sort_by": "liquidity", "sort_type": "desc"}
+    try:
+        await api_rate_limit()
+        async with session.get(url, headers=headers, params=params, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            if r.status == 403 or r.status == 429:
+                print(f"[BIRDEYE] markets {r.status} for {mint[:8]}...")
+                return None
+            if r.status != 200:
+                try:
+                    txt = await r.text()
+                except Exception:
+                    txt = "<no body>"
+                print(f"[BIRDEYE] markets HTTP {r.status} for {mint[:8]}... -> {txt[:200]}")
+                return None
+            j = await r.json()
+            if not j or not j.get("success"):
+                print(f"[BIRDEYE] markets failed for {mint[:8]}...: {str(j)[:200]}")
+                return None
+            data = j.get("data") or {}
+            items = data.get("items") if isinstance(data, dict) else data
+            return items if isinstance(items, list) else None
+    except Exception as e:
+        print(f"[BIRDEYE] markets exception for {mint[:8]}...: {e}")
+        return None
+
+def extract_holders(data: Dict[str, Any]) -> Optional[int]:
+    for k in ("holders", "holder", "holder_count", "holdersCount", "uniqueHolders"):
+        v = data.get(k)
+        if isinstance(v, (int, float)) and v >= 0:
+            return int(v)
+    return None
+
+def extract_lp_lock_ratio(data: Dict[str, Any]) -> Optional[float]:
+    for k in ("lp_lock_ratio", "lpLockRatio", "lp_locked", "lpLockedRatio"):
+        v = data.get(k)
+        try:
+            if v is None: continue
+            v = float(v)
+            return v*100 if 0 <= v <= 1 else v
+        except Exception:
+            continue
+    return None
+
+def extract_created_at(data: Dict[str, Any]) -> Optional[datetime]:
+    for k in ("createdAt", "firstTradeAt", "first_trade_at", "first_trade_unix", "firstTradeUnixTime"):
+        v = data.get(k)
+        if v is None: continue
+        try:
+            v = int(v)
+        except Exception:
+            try:
+                return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+            except Exception:
+                continue
+        return from_unix_ms(v)
+    return None
+
+def exchanges_block(markets: Optional[List[Dict[str, Any]]], is_pro: bool = False) -> str:
+    if not is_pro:
+        return T("exchanges_hidden")
+    if not markets:
+        return T("exchanges_empty")
+    cleaned = []
+    for m in markets:
+        dex = m.get("source") or m.get("dex") or m.get("market") or m.get("name")
+        liq = m.get("liquidity") or m.get("liquidityUsd") or (m.get("liquidity", {}) or {}).get("usd")
+        try:
+            liq = float(liq) if liq is not None else None
+        except Exception:
+            liq = None
+        if dex and liq is not None:
+            cleaned.append((dex, liq))
+    if not cleaned:
+        return T("exchanges_empty")
+    cleaned.sort(key=lambda x: x[1], reverse=True)
+    top = cleaned[:2]
+    lines = [T("exchanges_header")]
+    for dex, liq in top:
+        lines.append(T("exchanges_item", dex=dex, liq=format_usd(liq)))
+    return "\n".join(lines)
+
+def risk_flags(
+    liq_usd: Optional[float],
+    vol24: Optional[float],
+    lp_lock: Optional[float],
+    age_dt: Optional[datetime],
+    mint_active: bool,
+    freeze_active: bool,
+    top10_share: Optional[float]
+) -> List[str]:
+    """Comprehensive anti-rug risk flag detection"""
+    flags = []
+    
+    if liq_usd is not None and liq_usd < 10_000:
+        flags.append(T("risk_low_liquidity"))
+    
+    if vol24 is not None and vol24 < 5_000:
+        flags.append(T("risk_low_volume"))
+    
+    if lp_lock is not None:
+        try:
+            if float(lp_lock) < 20.0:
+                flags.append(T("risk_low_lp_lock"))
+        except Exception:
+            pass
+    
+    if age_dt:
+        try:
+            hrs = int((datetime.now(tz=timezone.utc) - age_dt).total_seconds() // 3600)
+            if hrs < 6:
+                flags.append(T("risk_new_token"))
+        except Exception:
+            pass
+    
+    if mint_active:
+        flags.append(T("risk_mint_authority"))
+    
+    if freeze_active:
+        flags.append(T("risk_freeze_authority"))
+    
+    try:
+        if top10_share is not None and top10_share >= 70.0:
+            flags.append(T("risk_top10_concentration", pct=f"{top10_share:.1f}"))
+    except Exception:
+        pass
+    
+    return flags
+
+def token_card(
+    p: Dict[str, Any],
+    extra: Optional[Dict[str, Any]],
+    is_pro: bool,
+    risk_list: Optional[List[str]] = None
+) -> str:
+    base = p.get("baseToken", {}) or {}
+    symbol = base.get("symbol") or T("unknown_token_symbol")
+    name   = base.get("name") or T("unknown_token_name")
+    price  = p.get("priceUsd")
+    price_txt = format_usd(price)
+
+    liq_usd = (p.get("liquidity") or {}).get("usd")
+    fdv     = p.get("fdv")
+    vol24   = (p.get("volume") or {}).get("h24")
+
+    age_dt = extract_created_at(extra) if extra else None
+    if not age_dt:
+        age_dt = from_unix_ms(p.get("pairCreatedAt"))
+    age_txt = human_age(age_dt)
+
+    holders = extract_holders(extra or {}) if extra else None
+    lp_lock = extract_lp_lock_ratio(extra or {}) if extra else None
+
+    lines = [
+        T("card_header", symbol=symbol, name=name),
+        T("card_price", price=price_txt),
+        T("card_liquidity", liq=format_usd(liq_usd)),
+        T("card_fdv", fdv=format_usd(fdv)),
+        T("card_volume", vol=format_usd(vol24)),
+        T("card_age", age=age_txt),
+    ]
+    
+    if is_pro:
+        if holders is not None:
+            lines.append(T("card_holders", holders=f"{holders:,}"))
         else:
-            text = build_summary_text(info)
-            kb = build_card_keyboard(mint, session_id, index, len(mints), showing_details=False)
-        await query.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
-        await query.answer()
-        return
-    # Scan navigation
-    if parts[0] == "scan" and len(parts) == 3:
-        session_id, index_str = parts[1], parts[2]
-        index = int(index_str)
-        mints = scan_sessions.get(session_id)
-        if not mints or index < 0 or index >= len(mints):
-            await query.answer(T("session_expired"))
-            return
-        mint = mints[index]
-        info = await fetch_token_info(mint)
-        if not info:
-            await query.answer(T("token_not_found"))
-            return
-        text = build_summary_text(info)
-        kb = build_card_keyboard(mint, session_id, index, len(mints), showing_details=False)
-        await query.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
-        await query.answer()
-        return
-    # Unknown callback
-    await query.answer(T("bad_callback"))
+            lines.append(f"Holders: {T('fmt_dash')}")
+        if lp_lock is not None:
+            lines.append(T("card_lp_locked", lp=f"{lp_lock:.1f}"))
+        else:
+            lines.append(f"LP Locked: {T('fmt_dash')}")
+    else:
+        lines.append(T("card_holders_hidden"))
+        lines.append(T("card_lp_locked_hidden"))
 
+    if risk_list:
+        lines.append(T("card_risk", risks=", ".join(risk_list)))
 
-# === Main entry point ===
-async def main() -> None:
-    conn = init_db()
-    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
-    dp = Dispatcher()
-    # Remove webhook before starting polling to avoid 409 conflicts
+    return "\n".join(lines)
+
+def build_summary_text(
+    p: Dict[str, Any],
+    extra: Optional[Dict[str, Any]],
+    mkts: Optional[List[Dict[str, Any]]],
+    is_pro: bool,
+    mint_active: bool = False,
+    freeze_active: bool = False,
+    top10_share: Optional[float] = None
+) -> str:
+    liq_usd = (p.get("liquidity") or {}).get("usd")
+    vol24   = (p.get("volume") or {}).get("h24")
+    lp_lock = extract_lp_lock_ratio(extra or {}) if extra else None
+    age_dt = extract_created_at(extra) if extra else None
+    if not age_dt:
+        age_dt = from_unix_ms(p.get("pairCreatedAt"))
+    
+    risk_list = risk_flags(liq_usd, vol24, lp_lock, age_dt, mint_active, freeze_active, top10_share)
+    
+    return token_card(p, extra, is_pro, risk_list)
+
+def birdeye_kv_block(extra: Optional[Dict[str, Any]]) -> str:
+    if not extra:
+        return T("birdeye_empty")
+    preferred = ["extensions", "decimals", "uniqueHolders24h", "uniqueHolders", "trade24h", "sell24h"]
+    simple_items: List[tuple[str, str]] = []
+    used = set()
+
+    def _fmt_val(k: str, v: Any) -> str:
+        try:
+            if v is None:
+                return T("fmt_dash")
+            if k in ("price", "marketCap", "mc", "liquidity", "v24hUSD", "v24h"):
+                return format_usd(float(v))
+            if isinstance(v, bool):
+                return T("fmt_yes") if v else T("fmt_no")
+            if isinstance(v, (int, float)):
+                return f"{v}"
+            return str(v)
+        except Exception:
+            return str(v)
+
+    for k in preferred:
+        if k in extra:
+            simple_items.append((k, _fmt_val(k, extra[k])))
+            used.add(k)
+
+    for k, v in extra.items():
+        if k in used:
+            continue
+        if isinstance(v, (bool, int, float)):
+            simple_items.append((k, _fmt_val(k, v)))
+
+    if not simple_items:
+        return T("birdeye_empty")
+
+    lines = [T("birdeye_header")]
+    for item_key, item_val in simple_items[:6]:
+        lines.append(T("birdeye_item", key=item_key, value=item_val))
+    return "\n".join(lines)
+
+def format_authority(auth: Optional[str]) -> str:
+    if not auth:
+        return T("authority_revoked")
+    short = auth[:4] + "..." + auth[-4:] if len(auth) > 12 else auth
+    return T("authority_active", short=short)
+
+def build_details_text(
+    p: Dict[str, Any],
+    extra: Optional[Dict[str, Any]],
+    mkts: Optional[List[Dict[str, Any]]],
+    helius_info: Optional[Dict[str, Any]],
+    topk_share: Optional[float],
+    is_pro: bool
+) -> str:
+    def f_pct(v: Optional[float]) -> str:
+        try:
+            if v is None:
+                return T("fmt_dash")
+            return f"{float(v):.2f}%"
+        except Exception:
+            return T("fmt_dash")
+
+    add_lines = []
+    mint_active = False
+    freeze_active = False
+    if helius_info:
+        mint_txt = format_authority(helius_info.get('mintAuthority'))
+        freeze_txt = format_authority(helius_info.get('freezeAuthority'))
+        mint_active = (helius_info.get('mintAuthority') is not None)
+        freeze_active = (helius_info.get('freezeAuthority') is not None)
+        add_lines.append(T("details_mint_auth", auth=mint_txt))
+        add_lines.append(T("details_freeze_auth", auth=freeze_txt))
+    else:
+        add_lines.append(T("details_mint_auth", auth=T("fmt_dash")))
+        add_lines.append(T("details_freeze_auth", auth=T("fmt_dash")))
+
+    if is_pro:
+        if topk_share is not None:
+            add_lines.append(T("details_top10", pct=f_pct(topk_share)))
+        else:
+            add_lines.append(f"Top-10 holders: {T('fmt_dash')}")
+    else:
+        add_lines.append(T("details_top10_hidden"))
+
+    liq_usd = (p.get("liquidity") or {}).get("usd")
+    vol24   = (p.get("volume") or {}).get("h24")
+    lp_lock = extract_lp_lock_ratio(extra or {}) if extra else None
+    age_dt = extract_created_at(extra) if extra else None
+    if not age_dt:
+        age_dt = from_unix_ms(p.get("pairCreatedAt"))
+    
+    risk_list = risk_flags(liq_usd, vol24, lp_lock, age_dt, mint_active, freeze_active, topk_share)
+
+    plan_hint = "" if is_pro else T("details_plan_hint")
+
+    be_block = birdeye_kv_block(extra)
+
+    ex_block = exchanges_block(mkts, is_pro)
+
+    core = token_card(p, extra, is_pro, risk_list)
+
+    parts = [
+        core,
+        "\n".join(add_lines),
+        plan_hint,
+        be_block,
+        ex_block
+    ]
+    parts = [x.strip() for x in parts if x and x.strip()]
+    return "\n\n".join(parts)
+
+def token_keyboard(p: Dict[str, Any], mode: str = "summary") -> InlineKeyboardMarkup:
+    mint = (p.get("baseToken") or {}).get("address")
+    row_toggle = (
+        [InlineKeyboardButton(text=T("btn_details"), callback_data=f"token:{mint}:details")]
+        if mode == "summary"
+        else [InlineKeyboardButton(text=T("btn_back"), callback_data=f"token:{mint}:summary")]
+    )
+    be_link = f"https://birdeye.so/token/{mint}?chain=solana"
+    solscan_link = f"https://solscan.io/token/{mint}"
+    jup_link = f"https://jup.ag/swap?outputMint={mint}"
+
+    row_birdeye = [InlineKeyboardButton(text=T("btn_birdeye"), url=be_link)]
+    row_solscan_buy = [
+        InlineKeyboardButton(text=T("btn_solscan"), url=solscan_link),
+        InlineKeyboardButton(text=T("btn_buy"), url=jup_link),
+    ]
+    row_actions = [
+        InlineKeyboardButton(text=T("btn_fav_add"), callback_data=f"fav:add:{mint}"),
+        InlineKeyboardButton(text=T("btn_share"), switch_inline_query=mint),
+    ]
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[row_toggle, row_birdeye, row_solscan_buy, row_actions]
+    )
+
+async def helius_rpc(session: aiohttp.ClientSession, method: str, params: list) -> Optional[dict]:
+    if not HELIUS_RPC_URL:
+        return None
+    try:
+        await api_rate_limit(min_interval_sec=0.12)
+        payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+        async with session.post(HELIUS_RPC_URL, json=payload, timeout=aiohttp.ClientTimeout(total=12)) as r:
+            if r.status != 200:
+                return None
+            return await r.json()
+    except Exception:
+        return None
+
+def _u64_le(buf: bytes, off: int) -> int:
+    return int.from_bytes(buf[off:off+8], "little", signed=False)
+
+def _pubkey_hex(buf: bytes, off: int) -> str:
+    return buf[off:off+32].hex()
+
+async def helius_get_mint_info(session: aiohttp.ClientSession, mint: str) -> Optional[dict]:
+    j = await helius_rpc(session, "getAccountInfo", [mint, {"encoding": "base64", "commitment": "finalized"}])
+    if not j or "result" not in j or not j["result"] or not j["result"].get("value"):
+        return None
+    val = j["result"]["value"]
+    data_str = (val.get("data") or [""])[0]
+    try:
+        data_bytes = base64.b64decode(data_str)
+    except Exception:
+        return None
+    if len(data_bytes) < 82:
+        return None
+
+    mint_auth_opt = _u64_le(data_bytes, 0)
+    freeze_auth_opt = _u64_le(data_bytes, 46)
+
+    mint_auth = _pubkey_hex(data_bytes, 4) if mint_auth_opt == 1 else None
+    freeze_auth = _pubkey_hex(data_bytes, 50) if freeze_auth_opt == 1 else None
+
+    return {
+        "mintAuthority": mint_auth,
+        "freezeAuthority": freeze_auth,
+    }
+
+async def helius_top_holders_share(session: aiohttp.ClientSession, mint: str, k: int = 10) -> Optional[float]:
+    j = await helius_rpc(session, "getTokenLargestAccounts", [mint, {"commitment": "finalized"}])
+    if not j or "result" not in j:
+        return None
+    result = j["result"]
+    accounts = result.get("value") or []
+    if not accounts:
+        return None
+    total_supply = sum(int(acc.get("amount") or 0) for acc in accounts)
+    if total_supply <= 0:
+        return None
+    topk = sorted(accounts, key=lambda x: int(x.get("amount") or 0), reverse=True)[:k]
+    topk_sum = sum(int(acc.get("amount") or 0) for acc in topk)
+    pct = (topk_sum / total_supply) * 100.0
+    return pct
+
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
+dp = Dispatcher()
+
+@dp.message(Command("start"))
+async def start_handler(m: Message):
+    if not m.from_user:
+        return
+    key = get_user_key(m.from_user.id)
+    if key:
+        await m.answer(T("start", product=PRODUCT.replace("_", "\\_")), **MSG_KW)
+    else:
+        await m.answer(T("enter_key"), **MSG_KW)
+
+@dp.message(Command("help"))
+async def help_handler(m: Message):
+    await m.answer(T("help"), **MSG_KW)
+
+@dp.message(Command("logout"))
+async def logout_handler(m: Message):
+    if not m.from_user:
+        return
+    user_id = m.from_user.id
+    if not get_user_key(user_id):
+        await m.answer(T("no_key"), **MSG_KW)
+        return
+    conn = db()
+    conn.execute("DELETE FROM user_access WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+    await m.answer(T("logged_out"), **MSG_KW)
+
+@dp.message(Command("my"))
+async def my_handler(m: Message):
+    if not m.from_user:
+        return
+    user_id = m.from_user.id
+    key = get_user_key(user_id)
+    if not key:
+        await m.answer(T("no_key"), **MSG_KW)
+        return
+    valid, msg = is_key_valid_for_product(key)
+    tier = "PRO" if is_pro_user(user_id) else "Free"
+    if valid:
+        await m.answer(f"✅ {msg}\nTier: {tier}", **MSG_KW)
+    else:
+        await m.answer(f"⛔ {msg}", **MSG_KW)
+
+@dp.message(Command("scan"))
+async def scan_handler(m: Message):
+    if not m.from_user:
+        return
+    start_time = time.time()
+    user_id = m.from_user.id
+    key = get_user_key(user_id)
+    if not key:
+        log_command(user_id, "/scan", "", ok=False, err="no_access")
+        await m.answer(T("no_access"), **MSG_KW)
+        return
+    valid, msg = is_key_valid_for_product(key)
+    if not valid:
+        log_command(user_id, "/scan", "", ok=False, err="access_invalid")
+        await m.answer(T("access_invalid", msg=msg), **MSG_KW)
+        return
+
+    is_pro = is_pro_user(user_id)
+    cooldown = SCAN_COOLDOWN_PRO_SEC if is_pro else SCAN_COOLDOWN_SEC
+
+    now_ts = int(time.time())
+    last_ts = get_last_scan_ts(user_id)
+    if (now_ts - last_ts) < cooldown:
+        remaining = cooldown - (now_ts - last_ts)
+        log_command(user_id, "/scan", "", ok=False, err="cooldown")
+        await m.answer(T("cooldown", remaining=remaining), **MSG_KW)
+        return
+
+    set_last_scan_ts(user_id, now_ts)
+
+    status = await m.answer(T("scan_progress", i=0, n=0), **MSG_KW)
+
+    pairs = await fetch_latest_sol_pairs(limit=8)
+
+    if not pairs:
+        log_command(user_id, "/scan", "", ok=False, err="no_pairs")
+        await status.edit_text(T("no_pairs"), **MSG_KW)
+        return
+
+    _cleanup_scan_sessions()
+    sid = _new_sid()
+    _scan_cache_sessions[sid] = {
+        "pairs": pairs,
+        "ts": time.time()
+    }
+
+    p = pairs[0]
+    mint = (p.get("baseToken") or {}).get("address", "")
+
+    async with aiohttp.ClientSession() as session:
+        extra = None
+        if BIRDEYE_API_KEY and mint:
+            extra = await birdeye_overview(session, mint)
+        if p.get("priceUsd") is None and mint:
+            jp = await jupiter_price(session, mint)
+            if jp is not None:
+                p["priceUsd"] = jp
+
+    text = build_summary_text(p, extra, mkts=None, is_pro=is_pro)
+    kb = scan_nav_kb(sid, 0, mint, mode="summary")
+
+    try:
+        await status.edit_text(text, reply_markup=kb, **MSG_KW)
+    except Exception:
+        await m.answer(text, reply_markup=kb, **MSG_KW)
+
+    elapsed_ms = int((time.time() - start_time) * 1000)
+    log_command(user_id, "/scan", f"sid={sid}", ok=True, ms=elapsed_ms)
+
+@dp.message(Command("token"))
+async def token_handler(m: Message):
+    if not m.from_user:
+        return
+    start_time = time.time()
+    user_id = m.from_user.id
+    key = get_user_key(user_id)
+    if not key:
+        log_command(user_id, "/token", "", ok=False, err="no_access")
+        await m.answer(T("no_access"), **MSG_KW)
+        return
+    valid, msg = is_key_valid_for_product(key)
+    if not valid:
+        log_command(user_id, "/token", "", ok=False, err="access_invalid")
+        await m.answer(T("access_invalid", msg=msg), **MSG_KW)
+        return
+
+    args = (m.text or "").split(maxsplit=1)
+    if len(args) < 2:
+        log_command(user_id, "/token", "", ok=False, err="usage")
+        await m.answer(T("usage_token"), **MSG_KW)
+        return
+
+    mint = normalize_mint_arg(args[1])
+    if not mint:
+        log_command(user_id, "/token", args[1], ok=False, err="cant_detect_mint")
+        await m.answer(T("cant_detect_mint"), **MSG_KW)
+        return
+
+    is_pro = is_pro_user(user_id)
+
+    status = await m.answer(T("fetching_data", mint=mint), **MSG_KW)
+
+    async with aiohttp.ClientSession() as session:
+        extra = None
+        security = None
+        mkts = None
+        birdeye_price_val = None
+        jupiter_price_val = None
+        
+        if BIRDEYE_API_KEY:
+            results = await asyncio.gather(
+                birdeye_overview(session, mint),
+                birdeye_token_security(session, mint),
+                birdeye_markets(session, mint),
+                birdeye_price(session, mint),
+                return_exceptions=True
+            )
+            extra = results[0] if not isinstance(results[0], Exception) else None
+            security = results[1] if not isinstance(results[1], Exception) else None
+            mkts = results[2] if not isinstance(results[2], Exception) else None
+            birdeye_price_val = results[3] if not isinstance(results[3], Exception) else None
+        
+        if security and extra:
+            extra.update(security)
+        
+        p = {
+            "baseToken": {
+                "symbol": (extra or {}).get("symbol") or "",
+                "name": (extra or {}).get("name") or "",
+                "address": mint
+            },
+            "priceUsd": birdeye_price_val or (extra or {}).get("price"),
+            "liquidity": {"usd": (extra or {}).get("liquidity")},
+            "fdv": (extra or {}).get("mc") or (extra or {}).get("marketCap") or (extra or {}).get("fdv"),
+            "volume": {"h24": (extra or {}).get("v24hUSD") or (extra or {}).get("v24h") or (extra or {}).get("volume24h")},
+            "pairCreatedAt": (extra or {}).get("createdAt") or (extra or {}).get("firstTradeAt") or (extra or {}).get("firstTradeUnixTime"),
+            "chainId": "solana",
+        }
+
+        if p.get("priceUsd") is None:
+            jupiter_price_val = await jupiter_price(session, mint)
+            if jupiter_price_val is not None:
+                p["priceUsd"] = jupiter_price_val
+
+    if not extra and p.get("priceUsd") is None:
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        log_command(user_id, "/token", mint, ok=False, ms=elapsed_ms, err="token_not_found")
+        await status.edit_text(T("token_not_found"), **MSG_KW)
+        return
+
+    text = build_summary_text(p, extra, mkts, is_pro)
+    kb = token_keyboard(p, mode="summary")
+
+    try:
+        await status.edit_text(text, reply_markup=kb, **MSG_KW)
+    except Exception:
+        await m.answer(text, reply_markup=kb, **MSG_KW)
+
+    elapsed_ms = int((time.time() - start_time) * 1000)
+    log_command(user_id, "/token", mint, ok=True, ms=elapsed_ms)
+
+@dp.message(Command("fav"))
+async def fav_handler(m: Message):
+    if not m.from_user:
+        return
+    user_id = m.from_user.id
+    key = get_user_key(user_id)
+    if not key:
+        await m.answer(T("no_access"), **MSG_KW)
+        return
+
+    args = (m.text or "").split()
+    if len(args) < 2:
+        await m.answer(T("fav_usage"), **MSG_KW)
+        return
+
+    sub = args[1].lower()
+
+    if sub == "add":
+        if len(args) < 3:
+            await m.answer(T("fav_add_usage"), **MSG_KW)
+            return
+        mint = normalize_mint_arg(args[2])
+        if not mint:
+            await m.answer(T("cant_detect_mint"), **MSG_KW)
+            return
+        add_favorite(user_id, mint)
+        await m.answer(T("fav_added", mint=mint), **MSG_KW)
+        return
+
+    if sub == "list":
+        favs = list_favorites(user_id)
+        if not favs:
+            await m.answer(T("fav_empty"), **MSG_KW)
+            return
+        fav_lines = "\n".join(f"• `{f}`" for f in favs)
+        await m.answer(T("fav_list_header", favs=fav_lines), **MSG_KW)
+        return
+
+    await m.answer(T("unknown_subcommand"), **MSG_KW)
+
+@dp.callback_query(F.data.startswith("token:"))
+async def token_callback_handler(cb: CallbackQuery):
+    if not cb.from_user or not cb.message:
+        return
+    start_time = time.time()
+    try:
+        parts = cb.data.split(":")
+        mint = parts[1]
+        mode = parts[2] if len(parts) > 2 else "summary"
+    except Exception:
+        await cb.answer(T("bad_callback"))
+        return
+
+    user_id = cb.from_user.id
+    is_pro = is_pro_user(user_id)
+
+    extra = None
+    mkts = None
+    helius_info = None
+    topk_share = None
+
+    async with aiohttp.ClientSession() as session:
+        if BIRDEYE_API_KEY and mint:
+            try:
+                extra = await birdeye_overview(session, mint)
+            except Exception:
+                extra = None
+            try:
+                mkts = await birdeye_markets(session, mint)
+            except Exception:
+                mkts = None
+
+        p = {
+            "baseToken": {
+                "symbol": (extra or {}).get("symbol") or "",
+                "name": (extra or {}).get("name") or "",
+                "address": mint
+            },
+            "priceUsd": (extra or {}).get("price"),
+            "liquidity": {"usd": (extra or {}).get("liquidity")},
+            "fdv": (extra or {}).get("mc") or (extra or {}).get("marketCap"),
+            "volume": {"h24": (extra or {}).get("v24hUSD") or (extra or {}).get("v24h")},
+            "pairCreatedAt": (extra or {}).get("createdAt") or (extra or {}).get("firstTradeAt"),
+            "chainId": "solana",
+        }
+
+        if p.get("priceUsd") is None and mint:
+            try:
+                jp = await jupiter_price(session, mint)
+                if jp is not None:
+                    p["priceUsd"] = jp
+            except Exception:
+                pass
+
+        if mode == "details":
+            try:
+                helius_info = await helius_get_mint_info(session, mint)
+            except Exception:
+                helius_info = None
+            try:
+                topk_share = await helius_top_holders_share(session, mint, k=10)
+            except Exception:
+                topk_share = None
+
+    try:
+        if mode == "details":
+            text = build_details_text(p, extra, mkts, helius_info, topk_share, is_pro)
+            kb = token_keyboard(p, mode="details")
+        else:
+            mint_active = helius_info.get("mintAuthority") is not None if helius_info else False
+            freeze_active = helius_info.get("freezeAuthority") is not None if helius_info else False
+            text = build_summary_text(p, extra, mkts, is_pro, mint_active, freeze_active, topk_share)
+            kb = token_keyboard(p, mode="summary")
+
+        await cb.message.edit_text(text, reply_markup=kb, **MSG_KW)
+    except Exception:
+        pass
+
+    elapsed_ms = int((time.time() - start_time) * 1000)
+    log_command(user_id, f"callback:token:{mode}", mint, ok=True, ms=elapsed_ms)
+
+    await cb.answer()
+
+@dp.callback_query(F.data.startswith("scan:session:"))
+async def scan_cb_handler(cb: CallbackQuery):
+    if not cb.from_user or not cb.message:
+        return
+    start_time = time.time()
+    try:
+        parts = cb.data.split(":")
+        sid = parts[2]
+        action = parts[3]
+        idx = int(parts[4])
+    except Exception:
+        await cb.answer(T("bad_callback"))
+        return
+
+    user_id = cb.from_user.id
+    is_pro = is_pro_user(user_id)
+
+    _cleanup_scan_sessions()
+    sess = _scan_cache_sessions.get(sid)
+    if not sess:
+        await cb.answer(T("session_expired"))
+        return
+
+    pairs: List[Dict[str, Any]] = sess.get("pairs") or []
+    if not pairs:
+        await cb.answer(T("no_data"))
+        return
+
+    if idx < 0: idx = 0
+    if idx >= len(pairs): idx = len(pairs) - 1
+
+    p = pairs[idx]
+    mint = (p.get("baseToken") or {}).get("address", "")
+
+    text = None
+    kb = None
+
+    async with aiohttp.ClientSession() as session:
+        extra = None
+        if BIRDEYE_API_KEY and mint:
+            try:
+                extra = await birdeye_overview(session, mint)
+            except Exception:
+                extra = None
+        if (p.get("priceUsd") is None) and mint:
+            try:
+                jp = await jupiter_price(session, mint)
+                if jp is not None:
+                    p["priceUsd"] = jp
+            except Exception:
+                pass
+
+        if action == "detail":
+            mkts = None
+            if BIRDEYE_API_KEY and mint:
+                try:
+                    mkts = await birdeye_markets(session, mint)
+                except Exception:
+                    mkts = None
+            helius_info = None
+            topk_share = None
+            if HELIUS_RPC_URL and mint:
+                try:
+                    helius_info, topk_share = await asyncio.gather(
+                        helius_get_mint_info(session, mint),
+                        helius_top_holders_share(session, mint),
+                    )
+                except Exception:
+                    helius_info, topk_share = None, None
+            text = build_details_text(p, extra, mkts, helius_info, topk_share, is_pro)
+            kb = scan_nav_kb(sid, idx, mint, mode="details")
+        else:
+            text = build_summary_text(p, extra, mkts=None, is_pro=is_pro)
+            kb = scan_nav_kb(sid, idx, mint, mode="summary")
+
+    try:
+        await cb.message.edit_text(text, reply_markup=kb, **MSG_KW)
+    except Exception:
+        await cb.message.answer(text, reply_markup=kb, **MSG_KW)
+
+    elapsed_ms = int((time.time() - start_time) * 1000)
+    log_command(user_id, f"callback:scan:{action}", f"sid={sid},idx={idx}", ok=True, ms=elapsed_ms)
+
+    await cb.answer()
+
+@dp.callback_query(F.data.startswith("fav:add:"))
+async def fav_add_callback(cb: CallbackQuery):
+    if not cb.from_user:
+        return
+    parts = cb.data.split(":")
+    if len(parts) < 3:
+        await cb.answer(T("bad_callback"))
+        return
+    mint = parts[2]
+    user_id = cb.from_user.id
+
+    if not get_user_key(user_id):
+        await cb.answer(T("no_active_access"))
+        return
+
+    add_favorite(user_id, mint)
+    log_command(user_id, "callback:fav:add", mint, ok=True)
+    await cb.answer(T("fav_added_callback", mint=mint))
+
+@dp.message(F.text)
+async def key_input_handler(m: Message):
+    if not m.from_user:
+        return
+    if get_user_key(m.from_user.id):
+        return
+    candidate = (m.text or "").strip()
+    ok, msg = is_key_valid_for_product(candidate)
+    if ok:
+        bind_user(m.from_user.id, candidate)
+        await m.answer(T("key_accepted", msg=msg), **MSG_KW)
+    else:
+        await m.answer(T("key_rejected", msg=msg), **MSG_KW)
+
+async def main():
+    seed_initial_keys()
+    
     await bot.delete_webhook(drop_pending_updates=True)
-    # Register handlers
-    dp.message.register(lambda m: cmd_start(m, conn), Command("start"))
-    dp.message.register(cmd_help, Command("help"))
-    dp.message.register(lambda m: cmd_my(m, conn), Command("my"))
-    dp.message.register(lambda m: cmd_logout(m, conn), Command("logout"))
-    dp.message.register(lambda m: cmd_token(m, conn), Command("token"))
-    dp.message.register(lambda m: cmd_scan(m, conn), Command("scan"))
-    dp.message.register(lambda m: cmd_fav(m, conn), Command("fav"))
-    dp.message.register(cmd_alerts, Command("alerts"))
-    dp.callback_query.register(lambda q: on_callback(q, conn))
-    # Start polling
+    
+    print(f"[BOT] Starting with Birdeye API key: {BIRDEYE_API_KEY[:10] if BIRDEYE_API_KEY else 'MISSING'}...")
+    print("[BOT] Single polling loop guaranteed - webhook deleted")
+    
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
