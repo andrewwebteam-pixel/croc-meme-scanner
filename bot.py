@@ -2461,7 +2461,7 @@ async def chain_handler(m: Message):
 
 @dp.message(Command("research"))
 async def research_handler(m: Message):
-    """Show Research menu with Filters and Scan buttons"""
+    """Show Research menu with Filters and Scan inline buttons"""
     if not m.from_user:
         return
     user_id = m.from_user.id
@@ -2470,13 +2470,27 @@ async def research_handler(m: Message):
         await m.answer(T("no_access"), **MSG_KW)
         return
     
-    kb = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=T("btn_filters")), KeyboardButton(text=T("btn_scan"))],
-        ],
-        resize_keyboard=True
-    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=T("btn_filters"), callback_data="researchmenu:filters")],
+        [InlineKeyboardButton(text=T("btn_scan"), callback_data="researchmenu:scan")]
+    ])
     await m.answer(T("research_menu"), reply_markup=kb, **MSG_KW)
+
+@dp.callback_query(F.data.startswith("researchmenu:"))
+async def research_menu_callback_handler(cb: CallbackQuery):
+    """Handle research menu inline button callbacks"""
+    if not cb.from_user or not cb.message:
+        return
+    
+    user_id = cb.from_user.id
+    action = cb.data.split(":")[1]
+    
+    if action == "filters":
+        await filters_handler(cb.message)
+    elif action == "scan":
+        await scan_handler(cb.message)
+    
+    await cb.answer()
 
 @dp.message(Command("filters"))
 async def filters_handler(m: Message):
@@ -2832,12 +2846,6 @@ async def text_input_handler(m: Message):
     # Handle menu button taps by converting emoji labels to commands
     if text_input == "🔎 Research":
         await research_handler(m)
-        return
-    elif text_input == "/Filters" or text_input == T("btn_filters"):
-        await filters_handler(m)
-        return
-    elif text_input == "/Scan" or text_input == T("btn_scan"):
-        await scan_handler(m)
         return
     elif text_input == "🎯 Find Token":
         _awaiting_token_input[user_id] = True
