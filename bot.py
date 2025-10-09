@@ -630,12 +630,9 @@ async def fetch_latest_sol_pairs(limit: int = 8) -> List[Dict[str, Any]]:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
                 async with s.get(url_markets, headers=headers, params=params_markets) as r:
                     status = r.status
-                    if status == 401:
-                        print("[SCAN] /defi/v2/markets returned 401 (unauthorized) - falling back to recently_added")
-                    elif status == 403:
-                        print("[SCAN] /defi/v2/markets returned 403 (plan limit) - falling back to recently_added")
-                    elif status == 429:
-                        print("[SCAN] /defi/v2/markets returned 429 (rate limit) - falling back to recently_added")
+                    print(f"[SCAN] Birdeye /defi/v2/markets status={status}")
+                    if status in [400, 401, 403, 429]:
+                        print(f"[SCAN] /defi/v2/markets returned {status} - immediate fallback")
                     elif status == 200:
                         try:
                             j = await r.json()
@@ -685,7 +682,10 @@ async def fetch_latest_sol_pairs(limit: int = 8) -> List[Dict[str, Any]]:
                 await api_rate_limit()
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
                     async with s.get(url_recent, headers=headers, params=params_recent) as r:
-                        if r.status == 200:
+                        print(f"[SCAN] Birdeye /defi/recently_added status={r.status}")
+                        if r.status in [400, 401, 403, 429]:
+                            print(f"[SCAN] /defi/recently_added returned {r.status} - immediate fallback")
+                        elif r.status == 200:
                             try:
                                 j = await r.json()
                                 if j and j.get("success"):
@@ -731,10 +731,13 @@ async def fetch_latest_sol_pairs(limit: int = 8) -> List[Dict[str, Any]]:
         print("[SCAN] Trying external fallback: GeckoTerminal")
         try:
             await api_rate_limit()
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as s:
-                headers = {"Accept": "application/json"}
-                async with s.get("https://api.geckoterminal.com/api/v2/networks/solana/new_pools", headers=headers) as r:
-                    if r.status == 200:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
+                headers = {"Accept": "application/json", "User-Agent": "Mozilla/5.0"}
+                url_gecko = "https://api.geckoterminal.com/api/v2/networks/solana/new_pools"
+                async with s.get(url_gecko, headers=headers) as r:
+                    if r.status in [400, 401, 403, 404, 429]:
+                        print(f"[SCAN] GeckoTerminal HTTP {r.status} at {url_gecko} - immediate fallback")
+                    elif r.status == 200:
                         try:
                             j = await r.json()
                             if j and isinstance(j.get("data"), list):
@@ -788,54 +791,80 @@ async def fetch_latest_sol_pairs(limit: int = 8) -> List[Dict[str, Any]]:
             print(f"[SCAN] GeckoTerminal exception: {e}")
     
     if not pairs:
-        print("[SCAN] Trying final fallback: DexScreener")
-        try:
-            await api_rate_limit()
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as s:
-                async with s.get("https://api.dexscreener.com/latest/dex/pairs/solana") as r:
-                    if r.status == 200:
-                        try:
-                            j = await r.json()
-                            if j and isinstance(j.get("pairs"), list):
-                                seen_mints = set()
-                                for pair in j["pairs"]:
-                                    try:
-                                        base_token = pair.get("baseToken", {})
-                                        mint = base_token.get("address", "")
-                                        if not mint or mint in seen_mints:
-                                            continue
-                                        seen_mints.add(mint)
-                                        
-                                        created_ts = pair.get("pairCreatedAt", 0)
-                                        
-                                        pairs.append({
-                                            "baseToken": {
-                                                "symbol": base_token.get("symbol", ""),
-                                                "name": base_token.get("name", ""),
-                                                "address": mint
-                                            },
-                                            "priceUsd": float(pair.get("priceUsd", 0)) if pair.get("priceUsd") else None,
-                                            "liquidity": {"usd": float(pair.get("liquidity", {}).get("usd", 0)) if pair.get("liquidity") else None},
-                                            "fdv": float(pair.get("fdv", 0)) if pair.get("fdv") else None,
-                                            "volume": {"h24": float(pair.get("volume", {}).get("h24", 0)) if pair.get("volume") else None},
-                                            "pairCreatedAt": created_ts,
-                                            "chainId": "solana",
-                                        })
-                                    except Exception as e:
-                                        print(f"[SCAN] DexScreener pair error: {e}")
-                                        continue
+        print("[SCAN] Trying final fallback: DexScreener (multi-endpoint)")
+        
+        # Try multiple DexScreener endpoints
+        dex_candidates = [
+            "https://api.dexscreener.com/latest/dex/pairs/solana",
+            "https://api.dexscreener.com/token-profiles/latest/v1"
+        ]
+        
+        for dex_url in dex_candidates:
+            if pairs:
+                break
+                
+            try:
+                await api_rate_limit()
+                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
+                    async with s.get(dex_url) as r:
+                        print(f"[SCAN] DexScreener URL={dex_url}, status={r.status}")
+                        
+                        if r.status in [400, 401, 403, 404, 429]:
+                            print(f"[SCAN] DexScreener HTTP {r.status} - trying next endpoint")
+                            continue
+                            
+                        if r.status == 200:
+                            try:
+                                j = await r.json()
                                 
-                                pairs.sort(key=lambda x: x.get("pairCreatedAt", 0), reverse=True)
-                                pairs = pairs[:8]
-                                print(f"[SCAN] DexScreener returned {len(pairs)} pairs")
-                            else:
-                                print(f"[SCAN] DexScreener unexpected format: {str(j)[:200]}")
-                        except Exception as e:
-                            print(f"[SCAN] DexScreener parse error: {e}")
-                    else:
-                        print(f"[SCAN] DexScreener HTTP {r.status}")
-        except Exception as e:
-            print(f"[SCAN] DexScreener exception: {e}")
+                                # Handle different response formats
+                                items_list = None
+                                if isinstance(j.get("pairs"), list):
+                                    items_list = j["pairs"]
+                                elif isinstance(j, list):
+                                    items_list = j
+                                
+                                if items_list:
+                                    seen_mints = set()
+                                    for pair in items_list[:20]:
+                                        try:
+                                            base_token = pair.get("baseToken", {})
+                                            mint = base_token.get("address", "")
+                                            if not mint or mint in seen_mints:
+                                                continue
+                                            seen_mints.add(mint)
+                                            
+                                            created_ts = pair.get("pairCreatedAt", 0)
+                                            
+                                            pairs.append({
+                                                "baseToken": {
+                                                    "symbol": base_token.get("symbol", ""),
+                                                    "name": base_token.get("name", ""),
+                                                    "address": mint
+                                                },
+                                                "priceUsd": float(pair.get("priceUsd", 0)) if pair.get("priceUsd") else None,
+                                                "liquidity": {"usd": float(pair.get("liquidity", {}).get("usd", 0)) if pair.get("liquidity") else None},
+                                                "fdv": float(pair.get("fdv", 0)) if pair.get("fdv") else None,
+                                                "volume": {"h24": float(pair.get("volume", {}).get("h24", 0)) if pair.get("volume") else None},
+                                                "pairCreatedAt": created_ts,
+                                                "chainId": "solana",
+                                            })
+                                        except Exception as e:
+                                            print(f"[SCAN] DexScreener pair build error: {e}")
+                                            continue
+                                    
+                                    if pairs:
+                                        pairs.sort(key=lambda x: x.get("pairCreatedAt", 0), reverse=True)
+                                        pairs = pairs[:8]
+                                        print(f"[SCAN] DexScreener returned {len(pairs)} pairs from {dex_url}")
+                                else:
+                                    print(f"[SCAN] DexScreener unexpected format at {dex_url}: {str(j)[:200]}")
+                            except Exception as e:
+                                print(f"[SCAN] DexScreener parse error at {dex_url}: {e}")
+                        else:
+                            print(f"[SCAN] DexScreener HTTP {r.status} at {dex_url}")
+            except Exception as e:
+                print(f"[SCAN] DexScreener exception at {dex_url}: {e}")
     
     if pairs:
         _scan_cache["ts"] = time.time()
@@ -1980,11 +2009,18 @@ async def fav_handler(m: Message):
 
     if sub == "list":
         favs = list_favorites(user_id)
+        
+        # Build inline keyboard with Add/Remove buttons
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=T("btn_add_fav"), callback_data="favmenu:add")],
+            [InlineKeyboardButton(text=T("btn_remove_fav"), callback_data="favmenu:remove")]
+        ])
+        
         if not favs:
-            await m.answer(T("fav_empty"), **MSG_KW)
+            await m.answer(T("fav_empty"), reply_markup=kb, **MSG_KW)
             return
         fav_lines = "\n".join(f"• `{f}`" for f in favs)
-        await m.answer(T("fav_list_header", favs=fav_lines), **MSG_KW)
+        await m.answer(T("fav_list_header", favs=fav_lines), reply_markup=kb, **MSG_KW)
         return
     
     if sub == "del":
@@ -2022,7 +2058,7 @@ async def alerts_handler(m: Message):
     
     args = (m.text or "").split()
     
-    # Handle button tap - show alert list
+    # Handle button tap - show alert list with inline buttons
     if m.text == "🔔 Alerts":
         args = ["/alerts"]  # Treat as command with no subcommand
     
@@ -2032,19 +2068,25 @@ async def alerts_handler(m: Message):
         row = cur.fetchone()
         conn.close()
         
+        # Build inline keyboard with Add/Remove buttons
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=T("btn_add_alert"), callback_data="alertmenu:add")],
+            [InlineKeyboardButton(text=T("btn_remove_alert"), callback_data="alertmenu:remove")]
+        ])
+        
         if not row or not row[0]:
-            await m.answer(T("alert_list_empty"), **MSG_KW)
+            await m.answer(T("alert_list_empty"), reply_markup=kb, **MSG_KW)
             return
         
         try:
             thresholds = json.loads(row[0])
             alert_lines = []
             for mint, price in thresholds.items():
-                alert_lines.append(f"• `{mint[:8]}...` at ${price}")
-            await m.answer(T("alert_list_header", alerts="\n".join(alert_lines)), **MSG_KW)
+                alert_lines.append(f"• `{mint[:8]}...` — ${price}")
+            await m.answer(T("alert_list_header", alerts="\n".join(alert_lines)), reply_markup=kb, **MSG_KW)
         except Exception as e:
             print(f"[ALERTS] Parse error: {e}")
-            await m.answer(T("alert_list_empty"), **MSG_KW)
+            await m.answer(T("alert_list_empty"), reply_markup=kb, **MSG_KW)
         return
     
     sub = args[1].lower()
