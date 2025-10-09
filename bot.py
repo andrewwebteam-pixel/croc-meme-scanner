@@ -41,17 +41,20 @@ STR = {
     "cooldown": "⏳ Please wait {remaining}s before using /scan again (anti-spam).",
     "no_pairs": "😕 No fresh pairs available via Birdeye on the current plan.\nTry `/token <mint>` or upgrade your data plan.",
     "scan_progress": "🔍 Scanning Solana pairs… ({i}/{n})",
-    "start": "🤖 Welcome to the {product} bot! Use /help to see commands.",
+    "start": "Welcome to the {product} bot! Use /help to see commands.",
     "help": (
-        "Commands:\n"
-        "/token <mint> — get details on a token\n"
-        "/scan — scan fresh pairs\n"
-        "/fav add <mint> — add token to favorites\n"
-        "/fav list — show your favorites\n"
-        "/alerts — manage price alerts (coming soon)\n"
-        "/my — show your subscription status\n"
-        "/logout — remove your key\n"
-        "/help — show this help"
+        "🔎 *Research Tools:*\n"
+        "Use filters to find tokens by liquidity, volume, age, or holder distribution.\n\n"
+        "🎯 *Find Token:*\n"
+        "Get detailed info on any token by mint address or symbol.\n\n"
+        "⭐ *Favorites:*\n"
+        "Save and manage your favorite tokens.\n\n"
+        "🔔 *Alerts:*\n"
+        "Set price alerts for your tokens.\n\n"
+        "💡 *Quick Commands:*\n"
+        "/token <mint> — token details\n"
+        "/my — your subscription tier\n"
+        "/logout — remove your key"
     ),
     "logged_out": "✅ Your key has been removed. Goodbye!",
     "no_key": "You have no key saved. Use /start to enter a key.",
@@ -94,23 +97,23 @@ STR = {
     "btn_share": "📤 Share",
     "info_fdv": "FDV (Fully Diluted Valuation) = token price × total supply. Shows potential market cap if all tokens were in circulation.",
     "info_lp": "LP (Liquidity Pool) = funds locked in DEX pairs. Higher LP = easier to trade without slippage. Locked LP means devs can't rug pull.",
-    "card_price": "💵 Price: {price}",
-    "card_liquidity": "💦 Liquidity: {liq}",
-    "card_fdv": "📊 FDV/MC: {fdv}",
-    "card_volume": "📈 Volume 24h: {vol}",
-    "card_age": "⏳ Age: {age}",
-    "card_holders": "👥 Holders: {holders}",
-    "card_holders_hidden": "👥 Holders: Hidden on Free plan",
-    "card_lp_locked": "🔒 LP Locked: {lp}%",
-    "card_lp_locked_hidden": "🔒 LP Locked: Hidden on Free plan",
+    "card_price": "Price: {price}",
+    "card_liquidity": "Liquidity: {liq}",
+    "card_fdv": "FDV/MC: {fdv}",
+    "card_volume": "Volume 24h: {vol}",
+    "card_age": "Age: {age}",
+    "card_holders": "Holders: {holders}",
+    "card_holders_hidden": "Holders: Hidden on Free plan",
+    "card_lp_locked": "LP Locked: {lp}%",
+    "card_lp_locked_hidden": "LP Locked: Hidden on Free plan",
     "card_risk": "⚠️ Risk: {risks}",
-    "risk_low_liquidity": "⚠️ Low liquidity",
-    "risk_low_volume": "⚠️ Low volume",
-    "risk_low_lp_lock": "⚠️ Low LP lock (<20%)",
-    "risk_new_token": "⚠️ New token (<6h)",
-    "risk_mint_authority": "⚠️ Mint authority active",
-    "risk_freeze_authority": "⚠️ Freeze authority active",
-    "risk_top10_concentration": "⚠️ Top-10 concentration {pct}%",
+    "risk_low_liquidity": "Low liquidity",
+    "risk_low_volume": "Low volume",
+    "risk_low_lp_lock": "Low LP lock (<20%)",
+    "risk_new_token": "New token (<6h)",
+    "risk_mint_authority": "Mint authority active",
+    "risk_freeze_authority": "Freeze authority active",
+    "risk_top10_concentration": "Top-10 concentration {pct}%",
     "exchanges_header": "Exchanges:",
     "exchanges_empty": "Exchanges: —",
     "exchanges_item": "- {dex}: {liq} liquidity",
@@ -152,6 +155,30 @@ STR = {
     "chain_invalid": "❌ Invalid chain. Use: sol, eth, or bsc",
     "chain_usage": "Usage: `/chain <sol|eth|bsc>` or `/chain` to see current",
     "chain_not_supported": "⚠️ {chain} support coming soon. Only Solana (sol) is currently available.\nUse `/chain sol` to switch back.",
+    "research_menu": "🔎 *Research Tools*\n\nUse filters to find tokens matching specific criteria:",
+    "btn_filters": "/Filters",
+    "btn_scan": "/Scan",
+    "filters_menu": "Select a filter criterion (you can leave any filter empty):",
+    "btn_filter_liq": "💧 Liquidity",
+    "btn_filter_age": "⏰ Age",
+    "btn_filter_vol": "📊 Volume 24h",
+    "btn_clear_filters": "🗑️ Clear All Filters",
+    "filter_liq_prompt": "Enter minimum liquidity (USD):\nExample: 10000\n\nSend /skip to leave empty",
+    "filter_age_prompt": "Enter maximum token age:\nExamples: 1m, 1h, 1d, 1month, 1year\n\nSend /skip to leave empty",
+    "filter_vol_prompt": "Enter minimum 24h volume (USD):\nExample: 50000\n\nSend /skip to leave empty",
+    "filter_set": "✅ Filter set: {filter} = {value}",
+    "filter_cleared": "✅ Filter cleared: {filter}",
+    "filter_invalid": "❌ Invalid value. Try again or send /skip",
+    "filters_cleared_all": "✅ All filters cleared",
+    "filters_active": "📊 Active filters:\n{filters}",
+    "filters_none": "No filters set",
+    "no_pairs_filtered": "😕 No pairs matching your filters.\n\nTry adjusting your criteria or tap /Filters to modify.",
+    "favorites_menu": "⭐ *Your Favorites*\n\n{favs}\n\nManage your saved tokens:",
+    "btn_add_fav": "➕ Add Favorite",
+    "btn_remove_fav": "➖ Remove Favorite",
+    "alerts_menu": "🔔 *Price Alerts*\n\nTrack price changes for your favourite tokens:",
+    "btn_add_alert": "➕ Add Alert",
+    "btn_remove_alert": "➖ Remove Alert",
 }
 
 def T(key: str, **kwargs) -> str:
@@ -173,6 +200,9 @@ _awaiting_fav_add: Dict[int, bool] = {}
 _awaiting_fav_del: Dict[int, bool] = {}
 _awaiting_alert_set: Dict[int, Dict[str, Any]] = {}
 _awaiting_alert_del: Dict[int, bool] = {}
+_awaiting_filter_liq: Dict[int, bool] = {}
+_awaiting_filter_age: Dict[int, bool] = {}
+_awaiting_filter_vol: Dict[int, bool] = {}
 
 def _new_sid() -> str:
     return str(int(time.time()*1000)) + "-" + os.urandom(3).hex()
@@ -193,9 +223,8 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
     """Create the main menu ReplyKeyboardMarkup with 3 columns and emojis."""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🔍 Scan"), KeyboardButton(text="🎯 Find Token"), KeyboardButton(text="⭐ Add Fav")],
-            [KeyboardButton(text="📜 My Favs"), KeyboardButton(text="❌ Remove Fav"), KeyboardButton(text="🔔 Set Alert")],
-            [KeyboardButton(text="🔕 Remove Alert"), KeyboardButton(text="🧾 My Tier"), KeyboardButton(text="❔ Help")],
+            [KeyboardButton(text="🔎 Research"), KeyboardButton(text="🎯 Find Token"), KeyboardButton(text="⭐ Favorites")],
+            [KeyboardButton(text="🔔 Alerts"), KeyboardButton(text="🧾 My Tier"), KeyboardButton(text="❔ Help")],
             [KeyboardButton(text="🚪 Logout")],
         ],
         resize_keyboard=True,
@@ -320,6 +349,15 @@ def db():
             chain TEXT NOT NULL DEFAULT 'sol'
         );
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_filters (
+            user_id INTEGER PRIMARY KEY,
+            min_liq REAL,
+            min_vol REAL,
+            max_age_h REAL,
+            min_top10 REAL
+        );
+    """)
     return conn
 
 def seed_initial_keys():
@@ -426,12 +464,72 @@ def set_user_chain(user_id: int, chain: str):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("INSERT OR REPLACE INTO user_chain (user_id, chain) VALUES (?, ?)", (user_id, chain))
 
+def get_user_filters(user_id: int) -> Dict[str, Any]:
+    """Get user's scan filters"""
+    with sqlite3.connect(DB_PATH) as conn:
+        row = conn.execute("SELECT min_liq, min_vol, max_age_h, min_top10 FROM user_filters WHERE user_id = ?", (user_id,)).fetchone()
+    if not row:
+        return {}
+    return {
+        "min_liq": row[0],
+        "min_vol": row[1],
+        "max_age_h": row[2],
+        "min_top10": row[3]
+    }
+
+def set_user_filter(user_id: int, filter_key: str, value: Optional[float]):
+    """Set a specific filter value for user"""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("INSERT OR IGNORE INTO user_filters (user_id) VALUES (?)", (user_id,))
+        conn.execute(f"UPDATE user_filters SET {filter_key} = ? WHERE user_id = ?", (value, user_id))
+
+def clear_user_filters(user_id: int):
+    """Clear all filters for user"""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM user_filters WHERE user_id = ?", (user_id,))
+
 def get_last_scan_ts(user_id: int) -> int:
     conn = db()
     cur = conn.execute("SELECT last_scan_ts FROM user_throttle WHERE user_id = ?", (user_id,))
     row = cur.fetchone()
     conn.close()
     return int(row[0]) if row else 0
+
+def apply_filters_to_pairs(pairs: List[Dict[str, Any]], filters: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Apply user filters to pairs list"""
+    if not filters:
+        return pairs
+    
+    filtered = []
+    for p in pairs:
+        # Check liquidity filter
+        if filters.get("min_liq"):
+            liq = (p.get("liquidity") or {}).get("usd")
+            if liq is None or liq < filters["min_liq"]:
+                continue
+        
+        # Check volume filter
+        if filters.get("min_vol"):
+            vol = (p.get("volume") or {}).get("h24")
+            if vol is None or vol < filters["min_vol"]:
+                continue
+        
+        # Check age filter
+        if filters.get("max_age_h"):
+            created = p.get("pairCreatedAt")
+            if created:
+                created_dt = from_unix_ms(created) if isinstance(created, (int, float)) else None
+                if created_dt:
+                    age_h = (datetime.now(timezone.utc) - created_dt).total_seconds() / 3600
+                    if age_h > filters["max_age_h"]:
+                        continue
+        
+        # Note: top10 filter requires helius data, can't filter at scan level
+        # It's applied individually in token display
+        
+        filtered.append(p)
+    
+    return filtered
 
 def set_last_scan_ts(user_id: int, ts: int):
     conn = db()
@@ -1663,12 +1761,21 @@ async def scan_handler(m: Message):
 
     status = await m.answer(T("scan_progress", i=0, n=0), **MSG_KW)
 
-    pairs = await fetch_latest_sol_pairs(limit=8)
+    pairs = await fetch_latest_sol_pairs(limit=20)
 
     if not pairs:
         log_command(user_id, "/scan", "", ok=False, err="no_pairs")
         await status.edit_text(T("no_pairs_all_sources"), **MSG_KW)
         return
+    
+    # Apply user filters
+    user_filters = get_user_filters(user_id)
+    if user_filters:
+        pairs = apply_filters_to_pairs(pairs, user_filters)
+        if not pairs:
+            log_command(user_id, "/scan", "", ok=False, err="no_pairs_filtered")
+            await status.edit_text(T("no_pairs_filtered"), **MSG_KW)
+            return
 
     _cleanup_scan_sessions()
     sid = _new_sid()
@@ -2352,6 +2459,164 @@ async def chain_handler(m: Message):
     chain_names = {"sol": "Solana", "eth": "Ethereum", "bsc": "BSC"}
     await m.answer(T("chain_set", chain=chain_names.get(chain, chain)), **MSG_KW)
 
+@dp.message(Command("research"))
+async def research_handler(m: Message):
+    """Show Research menu with Filters and Scan buttons"""
+    if not m.from_user:
+        return
+    user_id = m.from_user.id
+    key = get_user_key(user_id)
+    if not key:
+        await m.answer(T("no_access"), **MSG_KW)
+        return
+    
+    kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=T("btn_filters")), KeyboardButton(text=T("btn_scan"))],
+        ],
+        resize_keyboard=True
+    )
+    await m.answer(T("research_menu"), reply_markup=kb, **MSG_KW)
+
+@dp.message(Command("filters"))
+async def filters_handler(m: Message):
+    """Show filter selection inline keyboard"""
+    if not m.from_user:
+        return
+    user_id = m.from_user.id
+    key = get_user_key(user_id)
+    if not key:
+        await m.answer(T("no_access"), **MSG_KW)
+        return
+    
+    filters = get_user_filters(user_id)
+    filter_text = []
+    if filters.get("min_liq"):
+        filter_text.append(f"💧 Liquidity: ≥ ${filters['min_liq']:,.0f}")
+    if filters.get("max_age_h"):
+        filter_text.append(f"⏰ Age: ≤ {filters['max_age_h']}h")
+    if filters.get("min_vol"):
+        filter_text.append(f"📊 Volume: ≥ ${filters['min_vol']:,.0f}")
+    
+    if filter_text:
+        active_filters = T("filters_active", filters="\n".join(filter_text))
+    else:
+        active_filters = T("filters_none")
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=T("btn_filter_liq"), callback_data="filter:liq")],
+        [InlineKeyboardButton(text=T("btn_filter_age"), callback_data="filter:age")],
+        [InlineKeyboardButton(text=T("btn_filter_vol"), callback_data="filter:vol")],
+        [InlineKeyboardButton(text=T("btn_clear_filters"), callback_data="filter:clear")]
+    ])
+    
+    await m.answer(f"{active_filters}\n\n{T('filters_menu')}", reply_markup=kb, **MSG_KW)
+
+@dp.callback_query(F.data.startswith("filter:"))
+async def filter_callback_handler(cb: CallbackQuery):
+    """Handle filter selection callbacks"""
+    if not cb.from_user or not cb.message:
+        return
+    
+    user_id = cb.from_user.id
+    action = cb.data.split(":")[1]
+    
+    if action == "clear":
+        clear_user_filters(user_id)
+        await cb.answer(T("filters_cleared_all"))
+        await cb.message.edit_text(f"{T('filters_none')}\n\n{T('filters_menu')}", **MSG_KW)
+        return
+    
+    if action == "liq":
+        _awaiting_filter_liq[user_id] = True
+        await cb.message.answer(T("filter_liq_prompt"), **MSG_KW)
+    elif action == "age":
+        _awaiting_filter_age[user_id] = True
+        await cb.message.answer(T("filter_age_prompt"), **MSG_KW)
+    elif action == "vol":
+        _awaiting_filter_vol[user_id] = True
+        await cb.message.answer(T("filter_vol_prompt"), **MSG_KW)
+    
+    await cb.answer()
+
+@dp.message(Command("favorites"))
+async def favorites_menu_handler(m: Message):
+    """Show favorites list with inline Add/Remove buttons"""
+    if not m.from_user:
+        return
+    user_id = m.from_user.id
+    key = get_user_key(user_id)
+    if not key:
+        await m.answer(T("no_access"), **MSG_KW)
+        return
+    
+    favs = list_favorites(user_id)
+    if favs:
+        fav_lines = "\n".join(f"• `{f}`" for f in favs)
+    else:
+        fav_lines = T("fav_empty")
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=T("btn_add_fav"), callback_data="favmenu:add")],
+        [InlineKeyboardButton(text=T("btn_remove_fav"), callback_data="favmenu:remove")]
+    ])
+    
+    await m.answer(T("favorites_menu", favs=fav_lines), reply_markup=kb, **MSG_KW)
+
+@dp.callback_query(F.data.startswith("favmenu:"))
+async def favmenu_callback_handler(cb: CallbackQuery):
+    """Handle favorites menu callbacks"""
+    if not cb.from_user or not cb.message:
+        return
+    
+    user_id = cb.from_user.id
+    action = cb.data.split(":")[1]
+    
+    if action == "add":
+        _awaiting_fav_add[user_id] = True
+        await cb.message.answer(T("awaiting_mint"), **MSG_KW)
+    elif action == "remove":
+        _awaiting_fav_del[user_id] = True
+        await cb.message.answer(T("awaiting_mint"), **MSG_KW)
+    
+    await cb.answer()
+
+@dp.message(Command("alertsmenu"))
+async def alerts_menu_handler(m: Message):
+    """Show alerts menu with inline Add/Remove buttons"""
+    if not m.from_user:
+        return
+    user_id = m.from_user.id
+    key = get_user_key(user_id)
+    if not key:
+        await m.answer(T("no_access"), **MSG_KW)
+        return
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=T("btn_add_alert"), callback_data="alertmenu:add")],
+        [InlineKeyboardButton(text=T("btn_remove_alert"), callback_data="alertmenu:remove")]
+    ])
+    
+    await m.answer(T("alerts_menu"), reply_markup=kb, **MSG_KW)
+
+@dp.callback_query(F.data.startswith("alertmenu:"))
+async def alertmenu_callback_handler(cb: CallbackQuery):
+    """Handle alerts menu callbacks"""
+    if not cb.from_user or not cb.message:
+        return
+    
+    user_id = cb.from_user.id
+    action = cb.data.split(":")[1]
+    
+    if action == "add":
+        _awaiting_alert_set[user_id] = {"step": "mint"}
+        await cb.message.answer(T("awaiting_mint"), **MSG_KW)
+    elif action == "remove":
+        _awaiting_alert_del[user_id] = True
+        await cb.message.answer(T("awaiting_mint"), **MSG_KW)
+    
+    await cb.answer()
+
 @dp.message(F.text)
 async def text_input_handler(m: Message):
     if not m.from_user:
@@ -2469,6 +2734,60 @@ async def text_input_handler(m: Message):
         conn.close()
         return
     
+    # Filter input handlers
+    if user_id in _awaiting_filter_liq and _awaiting_filter_liq[user_id]:
+        _awaiting_filter_liq[user_id] = False
+        if text_input.lower() == "/skip":
+            set_user_filter(user_id, "min_liq", None)
+            await m.answer(T("filter_cleared", filter="Liquidity"), **MSG_KW)
+        else:
+            try:
+                value = float(text_input.replace(",", ""))
+                set_user_filter(user_id, "min_liq", value)
+                await m.answer(T("filter_set", filter="Liquidity", value=f"${value:,.0f}"), **MSG_KW)
+            except ValueError:
+                await m.answer(T("filter_invalid"), **MSG_KW)
+        return
+    
+    if user_id in _awaiting_filter_age and _awaiting_filter_age[user_id]:
+        _awaiting_filter_age[user_id] = False
+        if text_input.lower() == "/skip":
+            set_user_filter(user_id, "max_age_h", None)
+            await m.answer(T("filter_cleared", filter="Age"), **MSG_KW)
+        else:
+            # Parse age format: 1m, 1h, 1d, 1month, 1year
+            import re
+            match = re.match(r"(\d+)(m|h|d|month|year)", text_input.lower())
+            if match:
+                num = int(match.group(1))
+                unit = match.group(2)
+                hours = {
+                    "m": num / 60.0,
+                    "h": num,
+                    "d": num * 24,
+                    "month": num * 24 * 30,
+                    "year": num * 24 * 365
+                }.get(unit, 0)
+                set_user_filter(user_id, "max_age_h", hours)
+                await m.answer(T("filter_set", filter="Age", value=text_input), **MSG_KW)
+            else:
+                await m.answer(T("filter_invalid"), **MSG_KW)
+        return
+    
+    if user_id in _awaiting_filter_vol and _awaiting_filter_vol[user_id]:
+        _awaiting_filter_vol[user_id] = False
+        if text_input.lower() == "/skip":
+            set_user_filter(user_id, "min_vol", None)
+            await m.answer(T("filter_cleared", filter="Volume"), **MSG_KW)
+        else:
+            try:
+                value = float(text_input.replace(",", ""))
+                set_user_filter(user_id, "min_vol", value)
+                await m.answer(T("filter_set", filter="Volume", value=f"${value:,.0f}"), **MSG_KW)
+            except ValueError:
+                await m.answer(T("filter_invalid"), **MSG_KW)
+        return
+    
     if user_id in _awaiting_token_input and _awaiting_token_input[user_id]:
         _awaiting_token_input[user_id] = False
         mint_arg = text_input
@@ -2511,35 +2830,24 @@ async def text_input_handler(m: Message):
         return
     
     # Handle menu button taps by converting emoji labels to commands
-    if text_input == "🔍 Scan":
-        _awaiting_token_input[user_id] = False
-        _awaiting_fav_add[user_id] = False
-        _awaiting_fav_del[user_id] = False
-        _awaiting_alert_set.pop(user_id, None)
+    if text_input == "🔎 Research":
+        await research_handler(m)
+        return
+    elif text_input == "/Filters" or text_input == T("btn_filters"):
+        await filters_handler(m)
+        return
+    elif text_input == "/Scan" or text_input == T("btn_scan"):
         await scan_handler(m)
         return
     elif text_input == "🎯 Find Token":
         _awaiting_token_input[user_id] = True
         await m.answer(T("awaiting_mint"), **MSG_KW)
         return
-    elif text_input == "⭐ Add Fav":
-        _awaiting_fav_add[user_id] = True
-        await m.answer(T("awaiting_mint"), **MSG_KW)
+    elif text_input == "⭐ Favorites":
+        await favorites_menu_handler(m)
         return
-    elif text_input == "📜 My Favs":
-        await fav_handler(m)
-        return
-    elif text_input == "❌ Remove Fav":
-        _awaiting_fav_del[user_id] = True
-        await m.answer(T("awaiting_mint"), **MSG_KW)
-        return
-    elif text_input == "🔔 Set Alert":
-        _awaiting_alert_set[user_id] = {"step": "mint"}
-        await m.answer(T("awaiting_mint"), **MSG_KW)
-        return
-    elif text_input == "🔕 Remove Alert":
-        _awaiting_alert_del[user_id] = True
-        await m.answer(T("awaiting_mint"), **MSG_KW)
+    elif text_input == "🔔 Alerts":
+        await alerts_menu_handler(m)
         return
     elif text_input == "🧾 My Tier":
         await my_handler(m)
