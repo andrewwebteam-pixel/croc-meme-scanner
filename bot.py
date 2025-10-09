@@ -156,8 +156,8 @@ STR = {
     "chain_usage": "Usage: `/chain <sol|eth|bsc>` or `/chain` to see current",
     "chain_not_supported": "⚠️ {chain} support coming soon. Only Solana (sol) is currently available.\nUse `/chain sol` to switch back.",
     "research_menu": "🔎 *Research Tools*\n\nUse filters to find tokens matching specific criteria:",
-    "btn_filters": "/Filters",
-    "btn_scan": "/Scan",
+    "btn_filters": "🎛 Filters",
+    "btn_scan": "🔎 Scan",
     "filters_menu": "Select a filter criterion (you can leave any filter empty):",
     "btn_filter_liq": "💧 Liquidity",
     "btn_filter_age": "⏰ Age",
@@ -2483,12 +2483,132 @@ async def research_menu_callback_handler(cb: CallbackQuery):
         return
     
     user_id = cb.from_user.id
+    key = get_user_key(user_id)
+    if not key:
+        await cb.message.answer(T("no_access"), **MSG_KW)
+        await cb.answer()
+        return
+    
     action = cb.data.split(":")[1]
     
     if action == "filters":
-        await filters_handler(cb.message)
+        # Inline filters logic
+        filters = get_user_filters(user_id)
+        filter_text = []
+        if filters.get("min_liq"):
+            filter_text.append(f"💧 Liquidity: ≥ ${filters['min_liq']:,.0f}")
+        if filters.get("max_age_h"):
+            filter_text.append(f"⏰ Age: ≤ {filters['max_age_h']}h")
+        if filters.get("min_vol"):
+            filter_text.append(f"📊 Volume: ≥ ${filters['min_vol']:,.0f}")
+        
+        if filter_text:
+            active_filters = T("filters_active", filters="\n".join(filter_text))
+        else:
+            active_filters = T("filters_none")
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=T("btn_filter_liq"), callback_data="filter:liq")],
+            [InlineKeyboardButton(text=T("btn_filter_age"), callback_data="filter:age")],
+            [InlineKeyboardButton(text=T("btn_filter_vol"), callback_data="filter:vol")],
+            [InlineKeyboardButton(text=T("btn_clear_filters"), callback_data="filter:clear")]
+        ])
+        
+        await cb.message.answer(f"{active_filters}\n\n{T('filters_menu')}", reply_markup=kb, **MSG_KW)
+        
     elif action == "scan":
-        await scan_handler(cb.message)
+        # Inline scan logic
+        start_time = time.time()
+        
+        chain = get_user_chain(user_id)
+        if chain != "sol":
+            await cb.message.answer(T("chain_not_supported", chain=chain), **MSG_KW)
+            await cb.answer()
+            return
+        
+        is_pro = is_pro_user(user_id)
+        cooldown = SCAN_COOLDOWN_PRO_SEC if is_pro else SCAN_COOLDOWN_SEC
+        
+        now_ts = int(time.time())
+        last_ts = get_last_scan_ts(user_id)
+        if (now_ts - last_ts) < cooldown:
+            remaining = cooldown - (now_ts - last_ts)
+            log_command(user_id, "/scan", "", ok=False, err="cooldown")
+            await cb.message.answer(T("cooldown", remaining=remaining), **MSG_KW)
+            await cb.answer()
+            return
+        
+        set_last_scan_ts(user_id, now_ts)
+        
+        status = await cb.message.answer(T("scan_progress", i=0, n=0), **MSG_KW)
+        
+        pairs = await fetch_latest_sol_pairs(limit=20)
+        
+        if not pairs:
+            log_command(user_id, "/scan", "", ok=False, err="no_pairs")
+            await status.edit_text(T("no_pairs_all_sources"), **MSG_KW)
+            await cb.answer()
+            return
+        
+        # Apply user filters
+        user_filters = get_user_filters(user_id)
+        if user_filters:
+            pairs = apply_filters_to_pairs(pairs, user_filters)
+            if not pairs:
+                log_command(user_id, "/scan", "", ok=False, err="no_pairs_filtered")
+                await status.edit_text(T("no_pairs_filtered"), **MSG_KW)
+                await cb.answer()
+                return
+        
+        _cleanup_scan_sessions()
+        sid = _new_sid()
+        _scan_cache_sessions[sid] = {
+            "pairs": pairs,
+            "ts": time.time()
+        }
+        
+        p = pairs[0]
+        mint = (p.get("baseToken") or {}).get("address", "")
+        
+        async with aiohttp.ClientSession() as session:
+            extra = None
+            mkts = None
+            helius_info = None
+            topk_share = None
+            
+            if BIRDEYE_API_KEY and mint:
+                try:
+                    extra, mkts = await asyncio.gather(
+                        birdeye_overview(session, mint),
+                        birdeye_markets(session, mint),
+                    )
+                except Exception:
+                    extra, mkts = None, None
+            
+            if HELIUS_RPC_URL and mint:
+                try:
+                    helius_info, topk_share = await asyncio.gather(
+                        helius_get_mint_info(session, mint),
+                        helius_top_holders_share(session, mint),
+                    )
+                except Exception:
+                    helius_info, topk_share = None, None
+            
+            if p.get("priceUsd") is None and mint:
+                jp = await jupiter_price(session, mint)
+                if jp is not None:
+                    p["priceUsd"] = jp
+        
+        text = build_full_token_text(p, extra, mkts, helius_info, topk_share, is_pro)
+        kb = scan_nav_kb(sid, 0, mint, user_id)
+        
+        try:
+            await status.edit_text(text, reply_markup=kb, **MSG_KW)
+        except Exception:
+            await cb.message.answer(text, reply_markup=kb, **MSG_KW)
+        
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        log_command(user_id, "/scan", f"sid={sid}", ok=True, ms=elapsed_ms)
     
     await cb.answer()
 
