@@ -146,8 +146,8 @@ STR = {
     "my_status_invalid": "⛔ {msg}",
     "alert_set_usage": "Usage: `/alerts set <mint> <price>`",
     "alert_set_success": "✅ Alert set for {mint} at ${price}",
-    "alert_list_empty": "No alerts set. Use `/alerts set <mint> <price>`",
-    "alert_list_header": "🔔 Your alerts:\n{alerts}",
+    "alert_list_empty": "You have no alerts yet.\n\nUse the buttons below to add or remove alerts.",
+    "alert_list_header": "🔔 Your alerts:\n{alerts}\n\nManage your alerts using the buttons below:",
     "alert_invalid_price": "❌ Invalid price. Please use a number.",
     "no_pairs_all_sources": "😕 No fresh pairs available from any source.\nTry `/token <mint>` instead.",
     "chain_current": "Current chain: {chain}",
@@ -793,10 +793,11 @@ async def fetch_latest_sol_pairs(limit: int = 8) -> List[Dict[str, Any]]:
     if not pairs:
         print("[SCAN] Trying final fallback: DexScreener (multi-endpoint)")
         
-        # Try multiple DexScreener endpoints
+        # Try multiple DexScreener endpoints in priority order
         dex_candidates = [
-            "https://api.dexscreener.com/latest/dex/pairs/solana",
-            "https://api.dexscreener.com/token-profiles/latest/v1"
+            "https://api.dexscreener.com/token-pairs/v1/solana?limit=20",
+            "https://api.dexscreener.com/latest/dex/search?q=sol",
+            "https://api.dexscreener.com/latest/dex/pairs/solana"
         ]
         
         for dex_url in dex_candidates:
@@ -807,62 +808,71 @@ async def fetch_latest_sol_pairs(limit: int = 8) -> List[Dict[str, Any]]:
                 await api_rate_limit()
                 async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
                     async with s.get(dex_url) as r:
-                        print(f"[SCAN] DexScreener URL={dex_url}, status={r.status}")
+                        status = r.status
+                        print(f"[SCAN] Source=DexScreener, URL={dex_url}, status={status}")
                         
-                        if r.status in [400, 401, 403, 404, 429]:
-                            print(f"[SCAN] DexScreener HTTP {r.status} - trying next endpoint")
+                        if status != 200:
+                            print(f"[SCAN] DexScreener HTTP {status} - trying next endpoint")
                             continue
                             
-                        if r.status == 200:
-                            try:
-                                j = await r.json()
-                                
-                                # Handle different response formats
-                                items_list = None
-                                if isinstance(j.get("pairs"), list):
-                                    items_list = j["pairs"]
-                                elif isinstance(j, list):
-                                    items_list = j
-                                
-                                if items_list:
-                                    seen_mints = set()
-                                    for pair in items_list[:20]:
-                                        try:
-                                            base_token = pair.get("baseToken", {})
-                                            mint = base_token.get("address", "")
-                                            if not mint or mint in seen_mints:
-                                                continue
-                                            seen_mints.add(mint)
-                                            
-                                            created_ts = pair.get("pairCreatedAt", 0)
-                                            
-                                            pairs.append({
-                                                "baseToken": {
-                                                    "symbol": base_token.get("symbol", ""),
-                                                    "name": base_token.get("name", ""),
-                                                    "address": mint
-                                                },
-                                                "priceUsd": float(pair.get("priceUsd", 0)) if pair.get("priceUsd") else None,
-                                                "liquidity": {"usd": float(pair.get("liquidity", {}).get("usd", 0)) if pair.get("liquidity") else None},
-                                                "fdv": float(pair.get("fdv", 0)) if pair.get("fdv") else None,
-                                                "volume": {"h24": float(pair.get("volume", {}).get("h24", 0)) if pair.get("volume") else None},
-                                                "pairCreatedAt": created_ts,
-                                                "chainId": "solana",
-                                            })
-                                        except Exception as e:
-                                            print(f"[SCAN] DexScreener pair build error: {e}")
-                                            continue
+                        try:
+                            j = await r.json()
+                            
+                            if not j:
+                                print(f"[SCAN] DexScreener empty response - trying next endpoint")
+                                continue
+                            
+                            # Handle different response formats
+                            items_list = None
+                            if isinstance(j.get("pairs"), list):
+                                items_list = j["pairs"]
+                            elif isinstance(j.get("data"), list):
+                                items_list = j["data"]
+                            elif isinstance(j, list):
+                                items_list = j
+                            
+                            if not items_list:
+                                print(f"[SCAN] DexScreener no items in response - trying next endpoint")
+                                continue
+                            
+                            seen_mints = set()
+                            for pair in items_list[:20]:
+                                try:
+                                    # Extract baseToken
+                                    base_token = pair.get("baseToken", {})
+                                    mint = base_token.get("address", "")
+                                    if not mint or mint in seen_mints:
+                                        continue
+                                    seen_mints.add(mint)
                                     
-                                    if pairs:
-                                        pairs.sort(key=lambda x: x.get("pairCreatedAt", 0), reverse=True)
-                                        pairs = pairs[:8]
-                                        print(f"[SCAN] DexScreener returned {len(pairs)} pairs from {dex_url}")
-                                else:
-                                    print(f"[SCAN] DexScreener unexpected format at {dex_url}: {str(j)[:200]}")
-                            except Exception as e:
-                                print(f"[SCAN] DexScreener parse error at {dex_url}: {e}")
-                        else:
-                            print(f"[SCAN] DexScreener HTTP {r.status} at {dex_url}")
+                                    # Normalize pair data to our format
+                                    created_ts = pair.get("pairCreatedAt", 0)
+                                    
+                                    pairs.append({
+                                        "baseToken": {
+                                            "symbol": base_token.get("symbol", ""),
+                                            "name": base_token.get("name", ""),
+                                            "address": mint
+                                        },
+                                        "priceUsd": float(pair.get("priceUsd", 0)) if pair.get("priceUsd") else None,
+                                        "liquidity": {"usd": float(pair.get("liquidity", {}).get("usd", 0)) if pair.get("liquidity") else None},
+                                        "fdv": float(pair.get("fdv", 0)) if pair.get("fdv") else None,
+                                        "volume": {"h24": float(pair.get("volume", {}).get("h24", 0)) if pair.get("volume") else None},
+                                        "pairCreatedAt": created_ts,
+                                        "chainId": "solana",
+                                    })
+                                except Exception as e:
+                                    print(f"[SCAN] DexScreener pair build error: {e}")
+                                    continue
+                            
+                            if pairs:
+                                pairs.sort(key=lambda x: x.get("pairCreatedAt", 0), reverse=True)
+                                pairs = pairs[:8]
+                                print(f"[SCAN] Source=DexScreener, URL={dex_url}, status={status}, items={len(pairs)}")
+                            else:
+                                print(f"[SCAN] DexScreener no valid pairs extracted - trying next endpoint")
+                        except Exception as e:
+                            print(f"[SCAN] DexScreener parse error at {dex_url}: {e}")
             except Exception as e:
                 print(f"[SCAN] DexScreener exception at {dex_url}: {e}")
     
