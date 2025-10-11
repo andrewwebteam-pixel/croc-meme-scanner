@@ -239,11 +239,10 @@ def scan_nav_kb(sid: str, idx: int, mint: str, user_id: int) -> InlineKeyboardMa
 
     be_link = f"https://birdeye.so/token/{mint}?chain=solana"
     solscan_link = f"https://solscan.io/token/{mint}"
-    dex_link = f"https://dexscreener.com/solana/{mint}"
 
     row_buy_chart = [
-        InlineKeyboardButton(text=T("btn_buy"), url=dex_link),
-        InlineKeyboardButton(text=T("btn_chart"), url=dex_link),
+        InlineKeyboardButton(text=T("btn_buy"), url=be_link),
+        InlineKeyboardButton(text=T("btn_chart"), url=be_link),
     ]
     row_links = [
         InlineKeyboardButton(text=T("btn_birdeye"), url=be_link),
@@ -1315,11 +1314,10 @@ def token_keyboard(p: Dict[str, Any], user_id: Optional[int] = None) -> InlineKe
     
     be_link = f"https://birdeye.so/token/{mint}?chain=solana"
     solscan_link = f"https://solscan.io/token/{mint}"
-    dex_link = f"https://dexscreener.com/solana/{mint}"
 
     row_buy_chart = [
-        InlineKeyboardButton(text=T("btn_buy"), url=dex_link),
-        InlineKeyboardButton(text=T("btn_chart"), url=dex_link),
+        InlineKeyboardButton(text=T("btn_buy"), url=be_link),
+        InlineKeyboardButton(text=T("btn_chart"), url=be_link),
     ]
     row_explorers = [
         InlineKeyboardButton(text=T("btn_birdeye"), url=be_link),
