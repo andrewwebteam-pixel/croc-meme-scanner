@@ -669,10 +669,16 @@ async def fetch_latest_sol_pairs(limit: int = 8, user_filters: Optional[Dict[str
     # Fetch overview + security for each token and apply filters
     filtered_pairs = []
     now = datetime.now(timezone.utc)
+    processed_count = 0
+    
+    print(f"[SCAN] Starting to process {len(token_addresses)} tokens...")
     
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
         for mint in token_addresses:
             try:
+                processed_count += 1
+                print(f"[SCAN] Fetching data for token {processed_count}/{len(token_addresses)}: {mint[:8]}...")
+                
                 # Fetch overview and security data
                 overview, security = await asyncio.gather(
                     birdeye_overview(session, mint),
@@ -680,75 +686,109 @@ async def fetch_latest_sol_pairs(limit: int = 8, user_filters: Optional[Dict[str
                     return_exceptions=True
                 )
                 
-                if isinstance(overview, Exception) or isinstance(security, Exception):
-                    print(f"[SCAN] Error fetching data for {mint[:8]}: {overview if isinstance(overview, Exception) else security}")
+                if isinstance(overview, Exception):
+                    print(f"[SCAN] Overview exception for {mint[:8]}: {overview}")
                     continue
+                
+                if isinstance(security, Exception):
+                    print(f"[SCAN] Security exception for {mint[:8]}: {security} (continuing anyway)")
+                    security = None  # Continue without security data
                 
                 if not overview:
+                    print(f"[SCAN] No overview data for {mint[:8]}, skipping")
                     continue
                 
+                print(f"[SCAN] Got data for {mint[:8]}: symbol={overview.get('symbol')}, price={overview.get('price')}, liq={overview.get('liquidity')}")
+                
                 # Build pair object with all data
+                # Handle missing fields gracefully
+                symbol = overview.get("symbol") or "UNKNOWN"
+                name = overview.get("name") or "Unknown Token"
+                price = overview.get("price") or overview.get("priceUsd") or 0
+                liquidity = overview.get("liquidity") or overview.get("v24hUSD") or 0
+                fdv = overview.get("fdv") or overview.get("mc") or overview.get("marketCap") or 0
+                volume = overview.get("v24hUSD") or overview.get("volume") or 0
+                created_at = overview.get("createdAt") or overview.get("listingTime") or int(time.time() * 1000)
+                
                 pair = {
                     "baseToken": {
-                        "symbol": overview.get("symbol") or "",
-                        "name": overview.get("name") or "",
+                        "symbol": symbol,
+                        "name": name,
                         "address": mint
                     },
-                    "priceUsd": overview.get("price"),
-                    "liquidity": {"usd": overview.get("liquidity")},
-                    "fdv": overview.get("fdv") or overview.get("mc"),
-                    "volume": {"h24": overview.get("v24hUSD")},
-                    "pairCreatedAt": overview.get("createdAt") or overview.get("listingTime"),
+                    "priceUsd": price,
+                    "liquidity": {"usd": liquidity},
+                    "fdv": fdv,
+                    "volume": {"h24": volume},
+                    "pairCreatedAt": created_at,
                     "chainId": "solana",
                 }
+                
+                print(f"[SCAN] Built pair for {symbol}: liq=${liquidity}, vol=${volume}")
                 
                 # Apply filters if provided
                 if user_filters:
                     # Liquidity filter
                     min_liq = user_filters.get("min_liq")
-                    if min_liq is not None:
-                        liq = pair.get("liquidity", {}).get("usd")
-                        if liq is None or liq < min_liq:
+                    if min_liq is not None and min_liq > 0:
+                        liq = pair.get("liquidity", {}).get("usd") or 0
+                        if liq < min_liq:
+                            print(f"[SCAN] {symbol} filtered out: liq ${liq} < min ${min_liq}")
                             continue
                     
                     # Volume filter
                     min_vol = user_filters.get("min_vol")
-                    if min_vol is not None:
-                        vol = pair.get("volume", {}).get("h24")
-                        if vol is None or vol < min_vol:
+                    if min_vol is not None and min_vol > 0:
+                        vol = pair.get("volume", {}).get("h24") or 0
+                        if vol < min_vol:
+                            print(f"[SCAN] {symbol} filtered out: vol ${vol} < min ${min_vol}")
                             continue
                     
                     # Age filter
                     max_age_h = user_filters.get("max_age_h")
-                    if max_age_h is not None:
+                    if max_age_h is not None and max_age_h > 0:
                         created = pair.get("pairCreatedAt")
                         if created:
                             created_dt = from_unix_ms(created) if isinstance(created, (int, float)) else None
                             if created_dt:
                                 age_h = (now - created_dt).total_seconds() / 3600
                                 if age_h > max_age_h:
+                                    print(f"[SCAN] {symbol} filtered out: age {age_h:.1f}h > max {max_age_h}h")
                                     continue
                             else:
-                                continue
+                                # If we can't parse the date, skip age filter for this token
+                                print(f"[SCAN] {symbol} age filter skipped: couldn't parse date")
                         else:
-                            continue
+                            # If no creation date, skip age filter for this token
+                            print(f"[SCAN] {symbol} age filter skipped: no creation date")
                     
                     # Top-10 holder share filter
                     min_top10 = user_filters.get("min_top10")
-                    if min_top10 is not None and security:
-                        top10_share = security.get("top10HolderPercent") or security.get("top10_holder_percent")
-                        if top10_share is None or top10_share < min_top10:
-                            continue
+                    if min_top10 is not None and min_top10 > 0:
+                        if security:
+                            top10_share = security.get("top10HolderPercent") or security.get("top10_holder_percent") or 0
+                            if top10_share < min_top10:
+                                print(f"[SCAN] {symbol} filtered out: top10 {top10_share}% < min {min_top10}%")
+                                continue
+                        else:
+                            # If no security data, skip top10 filter for this token
+                            print(f"[SCAN] {symbol} top10 filter skipped: no security data")
                 
                 filtered_pairs.append(pair)
+                print(f"[SCAN] Token {mint[:8]} passed filters ({len(filtered_pairs)}/{limit})")
                 
                 # Stop if we have enough tokens
                 if len(filtered_pairs) >= limit:
+                    print(f"[SCAN] Reached limit of {limit} tokens, stopping early")
                     break
                     
             except Exception as e:
                 print(f"[SCAN] Error processing token {mint[:8]}: {e}")
+                import traceback
+                traceback.print_exc()
                 continue
+    
+    print(f"[SCAN] Processed {processed_count} tokens, {len(filtered_pairs)} passed filters")
     
     # Sort by creation time (newest first)
     filtered_pairs.sort(key=lambda x: x.get("pairCreatedAt", 0), reverse=True)
