@@ -14,7 +14,6 @@ from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton
 from dotenv import load_dotenv
 import aiohttp
-import base64
 
 # === Config ===
 load_dotenv()
@@ -24,8 +23,6 @@ DB_PATH = os.getenv("DB_PATH", "./keys.db")
 PRODUCT = os.getenv("PRODUCT", "meme_scanner")
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "").strip()
-HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "").strip()
-HELIUS_RPC_URL = os.getenv("HELIUS_RPC_URL", "").strip() or (f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}" if HELIUS_API_KEY else "")
 
 SCAN_COOLDOWN_SEC = int(os.getenv("SCAN_COOLDOWN_SEC", "30"))
 SCAN_COOLDOWN_PRO_SEC = int(os.getenv("SCAN_COOLDOWN_PRO_SEC", "10"))
@@ -537,7 +534,7 @@ def apply_filters_to_pairs(pairs: List[Dict[str, Any]], filters: Dict[str, Any])
                 # No creation time and filter is set, skip
                 continue
         
-        # Note: top10 filter (min_top10) requires Helius Premium API data for ALL pairs
+        # Note: top10 filter (min_top10) requires fetching security data for ALL pairs
         # This is not cost-effective to fetch during scan, so it's not applied here
         # Individual token displays will show holder data when available
         
@@ -599,30 +596,11 @@ def normalize_mint_arg(raw: str) -> Optional[str]:
     m = _mint_re.search(s)
     return m.group(0) if m else None
 
-async def jupiter_price(session: aiohttp.ClientSession, mint: str) -> Optional[float]:
-    try:
-        url = "https://price.jup.ag/v6/price"
-        params = {"ids": mint}
-        async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as r:
-            if r.status != 200:
-                return None
-            j = await r.json()
-            data = (j or {}).get("data") or {}
-            rec = data.get(mint) or {}
-            price = rec.get("price")
-            if price is None:
-                return None
-            return float(price)
-    except Exception:
-        return None
 
 async def fetch_latest_sol_pairs(limit: int = 8) -> List[Dict[str, Any]]:
     """
-    Fetch fresh Solana pairs with fallback strategy:
-    1. Try Birdeye /defi/v2/markets (sorted by liquidity)
-    2. If that fails or returns empty, try Birdeye /defi/recently_added
-    3. If both Birdeye endpoints fail, try DexScreener /latest/dex/tokens/solana
-    4. Deduplicate by mint, sort by pairCreatedAt, limit to 8 pairs
+    Fetch fresh Solana pairs using Birdeye API only.
+    Uses /defi/v2/markets with liquidity sorting to get recent active pairs.
     """
     if (_scan_cache["ts"] + SCAN_CACHE_TTL) > time.time() and _scan_cache["pairs"]:
         return _scan_cache["pairs"][:limit]
@@ -630,267 +608,65 @@ async def fetch_latest_sol_pairs(limit: int = 8) -> List[Dict[str, Any]]:
     pairs = []
 
     if not BIRDEYE_API_KEY:
-        print("[SCAN] Birdeye: BIRDEYE_API_KEY is empty -> skipping Birdeye, will try DexScreener")
-    else:
-        headers = {
-            "accept": "application/json",
-            "X-API-KEY": BIRDEYE_API_KEY,
-            "x-chain": "solana"
-        }
+        print("[SCAN] Birdeye: BIRDEYE_API_KEY is empty -> cannot scan")
+        return []
     
-        url_markets = f"{BIRDEYE_BASE}/defi/v2/markets"
-        params_markets = {"sort_by": "liquidity", "sort_type": "desc", "offset": 0, "limit": 50}
-        
-        try:
-            await api_rate_limit()
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
-                async with s.get(url_markets, headers=headers, params=params_markets) as r:
-                    status = r.status
-                    print(f"[SCAN] Birdeye /defi/v2/markets status={status}")
-                    if status in [400, 401, 403, 429]:
-                        print(f"[SCAN] /defi/v2/markets returned {status} - immediate fallback")
-                    elif status == 200:
-                        try:
-                            j = await r.json()
-                            if j and j.get("success"):
-                                data = j.get("data") or {}
-                                items = data.get("items") if isinstance(data, dict) else data
-                                if items and isinstance(items, list):
-                                    for m in items[:50]:
-                                        try:
-                                            base = {
-                                                "symbol": m.get("symbol") or "",
-                                                "name": m.get("name") or "",
-                                                "address": m.get("address") or m.get("baseAddress") or ""
-                                            }
-                                            pairs.append({
-                                                "baseToken": base,
-                                                "priceUsd": m.get("price"),
-                                                "liquidity": {"usd": m.get("liquidity") or m.get("liquidityUsd")},
-                                                "fdv": m.get("marketCap") or m.get("fdv"),
-                                                "volume": {"h24": m.get("v24hUSD") or m.get("v24h") or m.get("volume24h")},
-                                                "pairCreatedAt": m.get("createdAt") or m.get("firstTradeAt"),
-                                                "chainId": "solana",
-                                            })
-                                        except Exception as e:
-                                            print(f"[SCAN] pair build error: {e}")
-                                            continue
-                                    print(f"[SCAN] /defi/v2/markets returned {len(pairs)} pairs")
-                            else:
-                                print(f"[SCAN] /defi/v2/markets success==false: {str(j)[:200]}")
-                        except Exception as e:
-                            print(f"[SCAN] /defi/v2/markets parse error: {e}")
-                    else:
-                        try:
-                            txt = await r.text()
-                        except Exception:
-                            txt = "<no body>"
-                        print(f"[SCAN] /defi/v2/markets HTTP {status} -> {txt[:200]}")
-        except Exception as e:
-            print(f"[SCAN] /defi/v2/markets exception: {e}")
-        
-        if not pairs:
-            print("[SCAN] Trying fallback: /defi/recently_added")
-            url_recent = f"{BIRDEYE_BASE}/defi/recently_added"
-            params_recent = {"chain": "solana", "limit": 20}
-            
-            try:
-                await api_rate_limit()
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
-                    async with s.get(url_recent, headers=headers, params=params_recent) as r:
-                        print(f"[SCAN] Birdeye /defi/recently_added status={r.status}")
-                        if r.status in [400, 401, 403, 429]:
-                            print(f"[SCAN] /defi/recently_added returned {r.status} - immediate fallback")
-                        elif r.status == 200:
-                            try:
-                                j = await r.json()
-                                if j and j.get("success"):
-                                    data = j.get("data") or {}
-                                    items = data.get("items") if isinstance(data, dict) else (data if isinstance(data, list) else [])
-                                    for token in (items or []):
-                                        try:
-                                            mint = token.get("address") or token.get("mint") or ""
-                                            if not mint:
-                                                continue
-                                            base = {
-                                                "symbol": token.get("symbol") or "",
-                                                "name": token.get("name") or "",
-                                                "address": mint
-                                            }
-                                            pairs.append({
-                                                "baseToken": base,
-                                                "priceUsd": token.get("price"),
-                                                "liquidity": {"usd": token.get("liquidity")},
-                                                "fdv": token.get("mc") or token.get("marketCap"),
-                                                "volume": {"h24": token.get("v24hUSD") or token.get("v24h")},
-                                                "pairCreatedAt": token.get("createdAt") or token.get("firstTradeUnixTime"),
-                                                "chainId": "solana",
-                                            })
-                                        except Exception as e:
-                                            print(f"[SCAN] recently_added build error: {e}")
-                                            continue
-                                    print(f"[SCAN] /defi/recently_added returned {len(pairs)} pairs")
-                                else:
-                                    print(f"[SCAN] /defi/recently_added success==false: {str(j)[:200]}")
-                            except Exception as e:
-                                print(f"[SCAN] /defi/recently_added parse error: {e}")
-                        else:
-                            try:
-                                txt = await r.text()
-                            except Exception:
-                                txt = "<no body>"
-                            print(f"[SCAN] /defi/recently_added HTTP {r.status} -> {txt[:200]}")
-            except Exception as e:
-                print(f"[SCAN] /defi/recently_added exception: {e}")
+    headers = {
+        "accept": "application/json",
+        "X-API-KEY": BIRDEYE_API_KEY,
+        "x-chain": "solana"
+    }
+
+    url_markets = f"{BIRDEYE_BASE}/defi/v2/markets"
+    params_markets = {"sort_by": "liquidity", "sort_type": "desc", "offset": 0, "limit": 50}
     
-    if not pairs:
-        print("[SCAN] Trying external fallback: GeckoTerminal")
-        try:
-            await api_rate_limit()
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
-                headers = {"Accept": "application/json", "User-Agent": "Mozilla/5.0"}
-                url_gecko = "https://api.geckoterminal.com/api/v2/networks/solana/new_pools"
-                async with s.get(url_gecko, headers=headers) as r:
-                    if r.status in [400, 401, 403, 404, 429]:
-                        print(f"[SCAN] GeckoTerminal HTTP {r.status} at {url_gecko} - immediate fallback")
-                    elif r.status == 200:
-                        try:
-                            j = await r.json()
-                            if j and isinstance(j.get("data"), list):
-                                seen_mints = set()
-                                for pool_data in j["data"]:
+    try:
+        await api_rate_limit()
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
+            async with s.get(url_markets, headers=headers, params=params_markets) as r:
+                status = r.status
+                print(f"[SCAN] Birdeye /defi/v2/markets status={status}")
+                if status in [400, 401, 403, 429]:
+                    print(f"[SCAN] /defi/v2/markets returned {status} - check API key or plan limits")
+                elif status == 200:
+                    try:
+                        j = await r.json()
+                        if j and j.get("success"):
+                            data = j.get("data") or {}
+                            items = data.get("items") if isinstance(data, dict) else data
+                            if items and isinstance(items, list):
+                                for m in items[:50]:
                                     try:
-                                        pool = pool_data.get("attributes", {})
-                                        base_token = pool.get("base_token", {})
-                                        mint = base_token.get("address", "")
-                                        if not mint or mint in seen_mints:
-                                            continue
-                                        seen_mints.add(mint)
-                                        
-                                        created_at = pool.get("pool_created_at")
-                                        if created_at:
-                                            from datetime import datetime
-                                            try:
-                                                created_ts = int(datetime.fromisoformat(created_at.replace('Z', '+00:00')).timestamp())
-                                            except (ValueError, AttributeError, TypeError):
-                                                created_ts = 0
-                                        else:
-                                            created_ts = 0
-                                        
+                                        base = {
+                                            "symbol": m.get("symbol") or "",
+                                            "name": m.get("name") or "",
+                                            "address": m.get("address") or m.get("baseAddress") or ""
+                                        }
                                         pairs.append({
-                                            "baseToken": {
-                                                "symbol": base_token.get("symbol", ""),
-                                                "name": base_token.get("name", ""),
-                                                "address": mint
-                                            },
-                                            "priceUsd": float(pool.get("base_token_price_usd", 0)) if pool.get("base_token_price_usd") else None,
-                                            "liquidity": {"usd": float(pool.get("reserve_in_usd", 0)) if pool.get("reserve_in_usd") else None},
-                                            "fdv": float(pool.get("fdv_usd", 0)) if pool.get("fdv_usd") else None,
-                                            "volume": {"h24": float(pool.get("volume_usd", {}).get("h24", 0)) if pool.get("volume_usd") else None},
-                                            "pairCreatedAt": created_ts,
+                                            "baseToken": base,
+                                            "priceUsd": m.get("price"),
+                                            "liquidity": {"usd": m.get("liquidity") or m.get("liquidityUsd")},
+                                            "fdv": m.get("marketCap") or m.get("fdv"),
+                                            "volume": {"h24": m.get("v24hUSD") or m.get("v24h") or m.get("volume24h")},
+                                            "pairCreatedAt": m.get("createdAt") or m.get("firstTradeAt"),
                                             "chainId": "solana",
                                         })
                                     except Exception as e:
-                                        print(f"[SCAN] GeckoTerminal pool error: {e}")
+                                        print(f"[SCAN] pair build error: {e}")
                                         continue
-                                
-                                pairs.sort(key=lambda x: x.get("pairCreatedAt", 0), reverse=True)
-                                pairs = pairs[:8]
-                                print(f"[SCAN] GeckoTerminal returned {len(pairs)} pairs")
-                            else:
-                                print(f"[SCAN] GeckoTerminal unexpected format: {str(j)[:200]}")
-                        except Exception as e:
-                            print(f"[SCAN] GeckoTerminal parse error: {e}")
-                    else:
-                        print(f"[SCAN] GeckoTerminal HTTP {r.status}")
-        except Exception as e:
-            print(f"[SCAN] GeckoTerminal exception: {e}")
-    
-    if not pairs:
-        print("[SCAN] Trying final fallback: DexScreener (multi-endpoint)")
-        
-        # Try multiple DexScreener endpoints in priority order
-        dex_candidates = [
-            "https://api.dexscreener.com/token-pairs/v1/solana?limit=20",
-            "https://api.dexscreener.com/latest/dex/search?q=sol",
-            "https://api.dexscreener.com/latest/dex/pairs/solana"
-        ]
-        
-        for dex_url in dex_candidates:
-            if pairs:
-                break
-                
-            try:
-                await api_rate_limit()
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
-                    async with s.get(dex_url) as r:
-                        status = r.status
-                        print(f"[SCAN] Source=DexScreener, URL={dex_url}, status={status}")
-                        
-                        if status != 200:
-                            print(f"[SCAN] DexScreener HTTP {status} - trying next endpoint")
-                            continue
-                            
-                        try:
-                            j = await r.json()
-                            
-                            if not j:
-                                print(f"[SCAN] DexScreener empty response - trying next endpoint")
-                                continue
-                            
-                            # Handle different response formats
-                            items_list = None
-                            if isinstance(j.get("pairs"), list):
-                                items_list = j["pairs"]
-                            elif isinstance(j.get("data"), list):
-                                items_list = j["data"]
-                            elif isinstance(j, list):
-                                items_list = j
-                            
-                            if not items_list:
-                                print(f"[SCAN] DexScreener no items in response - trying next endpoint")
-                                continue
-                            
-                            seen_mints = set()
-                            for pair in items_list[:20]:
-                                try:
-                                    # Extract baseToken
-                                    base_token = pair.get("baseToken", {})
-                                    mint = base_token.get("address", "")
-                                    if not mint or mint in seen_mints:
-                                        continue
-                                    seen_mints.add(mint)
-                                    
-                                    # Normalize pair data to our format
-                                    created_ts = pair.get("pairCreatedAt", 0)
-                                    
-                                    pairs.append({
-                                        "baseToken": {
-                                            "symbol": base_token.get("symbol", ""),
-                                            "name": base_token.get("name", ""),
-                                            "address": mint
-                                        },
-                                        "priceUsd": float(pair.get("priceUsd", 0)) if pair.get("priceUsd") else None,
-                                        "liquidity": {"usd": float(pair.get("liquidity", {}).get("usd", 0)) if pair.get("liquidity") else None},
-                                        "fdv": float(pair.get("fdv", 0)) if pair.get("fdv") else None,
-                                        "volume": {"h24": float(pair.get("volume", {}).get("h24", 0)) if pair.get("volume") else None},
-                                        "pairCreatedAt": created_ts,
-                                        "chainId": "solana",
-                                    })
-                                except Exception as e:
-                                    print(f"[SCAN] DexScreener pair build error: {e}")
-                                    continue
-                            
-                            if pairs:
-                                pairs.sort(key=lambda x: x.get("pairCreatedAt", 0), reverse=True)
-                                pairs = pairs[:8]
-                                print(f"[SCAN] Source=DexScreener, URL={dex_url}, status={status}, items={len(pairs)}")
-                            else:
-                                print(f"[SCAN] DexScreener no valid pairs extracted - trying next endpoint")
-                        except Exception as e:
-                            print(f"[SCAN] DexScreener parse error at {dex_url}: {e}")
-            except Exception as e:
-                print(f"[SCAN] DexScreener exception at {dex_url}: {e}")
+                                print(f"[SCAN] /defi/v2/markets returned {len(pairs)} pairs")
+                        else:
+                            print(f"[SCAN] /defi/v2/markets success==false: {str(j)[:200]}")
+                    except Exception as e:
+                        print(f"[SCAN] /defi/v2/markets parse error: {e}")
+                else:
+                    try:
+                        txt = await r.text()
+                    except Exception:
+                        txt = "<no body>"
+                    print(f"[SCAN] /defi/v2/markets HTTP {status} -> {txt[:200]}")
+    except Exception as e:
+        print(f"[SCAN] /defi/v2/markets exception: {e}")
     
     if pairs:
         _scan_cache["ts"] = time.time()
@@ -936,7 +712,10 @@ async def birdeye_overview(session: aiohttp.ClientSession, mint: str) -> Optiona
         return None
 
 async def birdeye_token_security(session: aiohttp.ClientSession, mint: str) -> Optional[Dict[str, Any]]:
-    """Fetch token security info (mint authority, freeze authority, etc.)"""
+    """
+    Fetch token security info from Birdeye (mint authority, freeze authority, top holders, etc.)
+    Returns data with mintAuthority, freezeAuthority, top10HolderPercent fields.
+    """
     if not BIRDEYE_API_KEY:
         return None
     url = f"{BIRDEYE_BASE}/defi/token_security"
@@ -985,35 +764,6 @@ async def birdeye_price(session: aiohttp.ClientSession, mint: str) -> Optional[f
     except Exception:
         return None
 
-async def dexscreener_token(session: aiohttp.ClientSession, mint: str) -> Optional[Dict[str, Any]]:
-    """Fetch token info from DexScreener as fallback"""
-    try:
-        await api_rate_limit(min_interval_sec=0.5)
-        url = f"https://api.dexscreener.com/latest/dex/search?q={mint}"
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
-            if r.status != 200:
-                print(f"[DEXSCREENER] token HTTP {r.status} for {mint[:8]}...")
-                return None
-            j = await r.json()
-            if not j or not isinstance(j.get("pairs"), list) or len(j["pairs"]) == 0:
-                print(f"[DEXSCREENER] no pairs for {mint[:8]}...")
-                return None
-            pair = j["pairs"][0]
-            base_token = pair.get("baseToken", {})
-            return {
-                "symbol": base_token.get("symbol", ""),
-                "name": base_token.get("name", ""),
-                "address": mint,
-                "price": float(pair.get("priceUsd", 0)) if pair.get("priceUsd") else None,
-                "liquidity": float(pair.get("liquidity", {}).get("usd", 0)) if pair.get("liquidity") else None,
-                "fdv": float(pair.get("fdv", 0)) if pair.get("fdv") else None,
-                "marketCap": float(pair.get("marketCap", 0)) if pair.get("marketCap") else None,
-                "v24hUSD": float(pair.get("volume", {}).get("h24", 0)) if pair.get("volume") else None,
-                "pairCreatedAt": pair.get("pairCreatedAt"),
-            }
-    except Exception as e:
-        print(f"[DEXSCREENER] token exception for {mint[:8]}...: {e}")
-        return None
 
 async def birdeye_markets(session: aiohttp.ClientSession, mint: str) -> Optional[List[Dict[str, Any]]]:
     if not BIRDEYE_API_KEY:
@@ -1051,15 +801,15 @@ async def birdeye_markets(session: aiohttp.ClientSession, mint: str) -> Optional
 
 async def fetch_pair_data(session: aiohttp.ClientSession, mint: str) -> Optional[Dict[str, Any]]:
     """
-    Build basic pair dict with improved fallback strategy:
-    1. Try Birdeye overview (if API key available)
-    2. Try DexScreener search endpoint
-    3. Try DexScreener tokens/v1 endpoint
-    4. Try Jupiter price as last resort for price data
+    Build basic pair dict using Birdeye API only.
     Returns dict with: baseToken {symbol, name, address}, priceUsd, liquidity, fdv, volume, pairCreatedAt
     """
-    overview = await birdeye_overview(session, mint) if BIRDEYE_API_KEY else None
-    if overview and overview.get("price"):
+    if not BIRDEYE_API_KEY:
+        print(f"[FETCH_PAIR] No Birdeye API key for {mint[:8]}...")
+        return None
+    
+    overview = await birdeye_overview(session, mint)
+    if overview:
         return {
             "baseToken": {
                 "symbol": overview.get("symbol", ""),
@@ -1074,90 +824,8 @@ async def fetch_pair_data(session: aiohttp.ClientSession, mint: str) -> Optional
             "chainId": "solana",
         }
     
-    # Try DexScreener search
-    dex_data = await dexscreener_token(session, mint)
-    if dex_data and dex_data.get("price"):
-        return {
-            "baseToken": {
-                "symbol": dex_data.get("symbol", ""),
-                "name": dex_data.get("name", ""),
-                "address": mint
-            },
-            "priceUsd": dex_data.get("price"),
-            "liquidity": {"usd": dex_data.get("liquidity")},
-            "fdv": dex_data.get("fdv") or dex_data.get("marketCap"),
-            "volume": {"h24": dex_data.get("v24hUSD")},
-            "pairCreatedAt": dex_data.get("pairCreatedAt"),
-            "chainId": "solana",
-        }
-    
-    # Try alternative DexScreener endpoint
-    try:
-        await api_rate_limit(min_interval_sec=0.5)
-        url = f"https://api.dexscreener.com/tokens/v1/solana/{mint}"
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
-            if r.status == 200:
-                j = await r.json()
-                if j and isinstance(j.get("pairs"), list) and len(j["pairs"]) > 0:
-                    pair = j["pairs"][0]
-                    base_token = pair.get("baseToken", {})
-                    if pair.get("priceUsd"):
-                        return {
-                            "baseToken": {
-                                "symbol": base_token.get("symbol", ""),
-                                "name": base_token.get("name", ""),
-                                "address": mint
-                            },
-                            "priceUsd": float(pair.get("priceUsd", 0)) if pair.get("priceUsd") else None,
-                            "liquidity": {"usd": float(pair.get("liquidity", {}).get("usd", 0)) if pair.get("liquidity") else None},
-                            "fdv": float(pair.get("fdv", 0)) if pair.get("fdv") else None,
-                            "volume": {"h24": float(pair.get("volume", {}).get("h24", 0)) if pair.get("volume") else None},
-                            "pairCreatedAt": pair.get("pairCreatedAt"),
-                            "chainId": "solana",
-                        }
-    except Exception as e:
-        print(f"[FETCH_PAIR] DexScreener tokens/v1 error: {e}")
-    
-    # Last resort: try Jupiter for price only
-    jupiter_price_val = await jupiter_price(session, mint)
-    if jupiter_price_val:
-        symbol = overview.get("symbol", "") if overview else ""
-        name = overview.get("name", "") if overview else ""
-        return {
-            "baseToken": {
-                "symbol": symbol,
-                "name": name,
-                "address": mint
-            },
-            "priceUsd": jupiter_price_val,
-            "liquidity": {"usd": None},
-            "fdv": None,
-            "volume": {"h24": None},
-            "pairCreatedAt": None,
-            "chainId": "solana",
-        }
-    
     return None
 
-async def dexscreener_token_fallback(session: aiohttp.ClientSession, mint: str) -> Optional[Dict[str, Any]]:
-    """Wraps dexscreener_token and adapts return to pair dict format."""
-    dex_data = await dexscreener_token(session, mint)
-    if not dex_data:
-        return None
-    
-    return {
-        "baseToken": {
-            "symbol": dex_data.get("symbol", ""),
-            "name": dex_data.get("name", ""),
-            "address": mint
-        },
-        "priceUsd": dex_data.get("price"),
-        "liquidity": {"usd": dex_data.get("liquidity")},
-        "fdv": dex_data.get("fdv") or dex_data.get("marketCap"),
-        "volume": {"h24": dex_data.get("v24hUSD")},
-        "pairCreatedAt": dex_data.get("pairCreatedAt"),
-        "chainId": "solana",
-    }
 
 def extract_holders(data: Dict[str, Any]) -> Optional[int]:
     for k in ("holders", "holder", "holder_count", "holdersCount", "uniqueHolders"):
@@ -1427,7 +1095,7 @@ def build_details_text(
     p: Dict[str, Any],
     extra: Optional[Dict[str, Any]],
     mkts: Optional[List[Dict[str, Any]]],
-    helius_info: Optional[Dict[str, Any]],
+    security_info: Optional[Dict[str, Any]],
     topk_share: Optional[float],
     is_pro: bool
 ) -> str:
@@ -1442,11 +1110,11 @@ def build_details_text(
     add_lines = []
     mint_active = False
     freeze_active = False
-    if helius_info:
-        mint_txt = format_authority(helius_info.get('mintAuthority'))
-        freeze_txt = format_authority(helius_info.get('freezeAuthority'))
-        mint_active = (helius_info.get('mintAuthority') is not None)
-        freeze_active = (helius_info.get('freezeAuthority') is not None)
+    if security_info:
+        mint_txt = format_authority(security_info.get('mintAuthority'))
+        freeze_txt = format_authority(security_info.get('freezeAuthority'))
+        mint_active = (security_info.get('mintAuthority') is not None)
+        freeze_active = (security_info.get('freezeAuthority') is not None)
         add_lines.append(T("details_mint_auth", auth=mint_txt))
         add_lines.append(T("details_freeze_auth", auth=freeze_txt))
     else:
@@ -1533,7 +1201,7 @@ def build_full_token_text(
     p: Dict[str, Any],
     extra: Optional[Dict[str, Any]],
     mkts: Optional[List[Dict[str, Any]]],
-    helius_info: Optional[Dict[str, Any]],
+    security_info: Optional[Dict[str, Any]],
     topk_share: Optional[float],
     is_pro: bool
 ) -> str:
@@ -1549,11 +1217,11 @@ def build_full_token_text(
     add_lines = []
     mint_active = False
     freeze_active = False
-    if helius_info:
-        mint_txt = format_authority(helius_info.get('mintAuthority'))
-        freeze_txt = format_authority(helius_info.get('freezeAuthority'))
-        mint_active = (helius_info.get('mintAuthority') is not None)
-        freeze_active = (helius_info.get('freezeAuthority') is not None)
+    if security_info:
+        mint_txt = format_authority(security_info.get('mintAuthority'))
+        freeze_txt = format_authority(security_info.get('freezeAuthority'))
+        mint_active = (security_info.get('mintAuthority') is not None)
+        freeze_active = (security_info.get('freezeAuthority') is not None)
         add_lines.append(T("details_mint_auth", auth=mint_txt))
         add_lines.append(T("details_freeze_auth", auth=freeze_txt))
     else:
@@ -1679,71 +1347,6 @@ def token_keyboard(p: Dict[str, Any], user_id: Optional[int] = None) -> InlineKe
         inline_keyboard=[row_buy_chart, row_explorers, row_actions, row_info]
     )
 
-async def helius_rpc(session: aiohttp.ClientSession, method: str, params: list) -> Optional[dict]:
-    if not HELIUS_RPC_URL:
-        return None
-    try:
-        await api_rate_limit(min_interval_sec=0.12)
-        payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-        async with session.post(HELIUS_RPC_URL, json=payload, timeout=aiohttp.ClientTimeout(total=12)) as r:
-            if r.status != 200:
-                return None
-            return await r.json()
-    except Exception:
-        return None
-
-def _u64_le(buf: bytes, off: int) -> int:
-    return int.from_bytes(buf[off:off+8], "little", signed=False)
-
-def _pubkey_hex(buf: bytes, off: int) -> str:
-    return buf[off:off+32].hex()
-
-async def helius_get_mint_info(session: aiohttp.ClientSession, mint: str) -> Optional[dict]:
-    j = await helius_rpc(session, "getAccountInfo", [mint, {"encoding": "base64", "commitment": "finalized"}])
-    if not j or "result" not in j or not j["result"] or not j["result"].get("value"):
-        return None
-    val = j["result"]["value"]
-    data_str = (val.get("data") or [""])[0]
-    try:
-        data_bytes = base64.b64decode(data_str)
-    except Exception:
-        return None
-    if len(data_bytes) < 82:
-        return None
-
-    mint_auth_opt = _u64_le(data_bytes, 0)
-    freeze_auth_opt = _u64_le(data_bytes, 46)
-
-    mint_auth = _pubkey_hex(data_bytes, 4) if mint_auth_opt == 1 else None
-    freeze_auth = _pubkey_hex(data_bytes, 50) if freeze_auth_opt == 1 else None
-
-    return {
-        "mintAuthority": mint_auth,
-        "freezeAuthority": freeze_auth,
-    }
-
-async def helius_top_holders_share(session: aiohttp.ClientSession, mint: str, k: int = 10) -> Optional[float]:
-    """
-    Fetch top-K holders concentration percentage using Helius RPC.
-    
-    NOTE: This requires Helius API access (free tier has rate limits). 
-    For production at scale, consider Helius Premium to avoid rate limits.
-    Returns percentage of total supply held by top K holders.
-    """
-    j = await helius_rpc(session, "getTokenLargestAccounts", [mint, {"commitment": "finalized"}])
-    if not j or "result" not in j:
-        return None
-    result = j["result"]
-    accounts = result.get("value") or []
-    if not accounts:
-        return None
-    total_supply = sum(int(acc.get("amount") or 0) for acc in accounts)
-    if total_supply <= 0:
-        return None
-    topk = sorted(accounts, key=lambda x: int(x.get("amount") or 0), reverse=True)[:k]
-    topk_sum = sum(int(acc.get("amount") or 0) for acc in topk)
-    pct = (topk_sum / total_supply) * 100.0
-    return pct
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
 dp = Dispatcher()
@@ -1858,33 +1461,23 @@ async def scan_handler(m: Message):
     async with aiohttp.ClientSession() as session:
         extra = None
         mkts = None
-        helius_info = None
+        security_info = None
         topk_share = None
         
         if BIRDEYE_API_KEY and mint:
             try:
-                extra, mkts = await asyncio.gather(
+                extra, mkts, security_info = await asyncio.gather(
                     birdeye_overview(session, mint),
                     birdeye_markets(session, mint),
+                    birdeye_token_security(session, mint),
                 )
             except Exception:
-                extra, mkts = None, None
+                extra, mkts, security_info = None, None, None
         
-        if HELIUS_RPC_URL and mint:
-            try:
-                helius_info, topk_share = await asyncio.gather(
-                    helius_get_mint_info(session, mint),
-                    helius_top_holders_share(session, mint),
-                )
-            except Exception:
-                helius_info, topk_share = None, None
-        
-        if p.get("priceUsd") is None and mint:
-            jp = await jupiter_price(session, mint)
-            if jp is not None:
-                p["priceUsd"] = jp
+        if security_info:
+            topk_share = security_info.get("top10HolderPercent") or security_info.get("top10_holder_percent")
 
-    text = build_full_token_text(p, extra, mkts, helius_info, topk_share, is_pro)
+    text = build_full_token_text(p, extra, mkts, security_info, topk_share, is_pro)
     kb = scan_nav_kb(sid, 0, mint, user_id)
 
     try:
@@ -1935,10 +1528,9 @@ async def token_handler(m: Message):
 
     async with aiohttp.ClientSession() as session:
         extra = None
-        security = None
+        security_info = None
         mkts = None
         birdeye_price_val = None
-        helius_info = None
         topk_share = None
         
         if BIRDEYE_API_KEY:
@@ -1950,20 +1542,18 @@ async def token_handler(m: Message):
                 return_exceptions=True
             )
             extra = results[0] if not isinstance(results[0], Exception) else None
-            security = results[1] if not isinstance(results[1], Exception) else None
+            security_info = results[1] if not isinstance(results[1], Exception) else None
             mkts = results[2] if not isinstance(results[2], Exception) else None
             birdeye_price_val = results[3] if not isinstance(results[3], Exception) else None
         
         if not extra:
-            print(f"[TOKEN] Birdeye failed, trying DexScreener for {mint[:8]}...")
-            extra = await dexscreener_token(session, mint)
+            print(f"[TOKEN] Birdeye failed for {mint[:8]}...")
         
-        if security and extra:
-            extra.update(security)
+        if security_info and extra:
+            extra.update(security_info)
         
-        if HELIUS_RPC_URL:
-            helius_info = await helius_get_mint_info(session, mint)
-            topk_share = await helius_top_holders_share(session, mint)
+        if security_info:
+            topk_share = security_info.get("top10HolderPercent") or security_info.get("top10_holder_percent")
         
         p = {
             "baseToken": {
@@ -1979,11 +1569,6 @@ async def token_handler(m: Message):
             "chainId": "solana",
         }
 
-        if p.get("priceUsd") is None:
-            jupiter_price_val = await jupiter_price(session, mint)
-            if jupiter_price_val is not None:
-                p["priceUsd"] = jupiter_price_val
-
     if not extra and p.get("priceUsd") is None:
         elapsed_ms = int((time.time() - start_time) * 1000)
         log_command(user_id, "/token", mint, ok=False, ms=elapsed_ms, err="token_not_found")
@@ -1995,12 +1580,12 @@ async def token_handler(m: Message):
         "p": p,
         "extra": extra,
         "mkts": mkts,
-        "helius_info": helius_info,
+        "security_info": security_info,
         "topk_share": topk_share,
         "ts": time.time()
     }
 
-    text = build_full_token_text(p, extra, mkts, helius_info, topk_share, is_pro)
+    text = build_full_token_text(p, extra, mkts, security_info, topk_share, is_pro)
     kb = token_keyboard(p, user_id=user_id)
 
     try:
@@ -2237,9 +1822,13 @@ async def token_callback_handler(cb: CallbackQuery):
         p = sess.get("p", {})
         extra = sess.get("extra")
         mkts = sess.get("mkts")
+        security_info = sess.get("security_info")
+        topk_share = sess.get("topk_share")
     else:
         extra = None
         mkts = None
+        security_info = None
+        topk_share = None
         async with aiohttp.ClientSession() as session:
             if BIRDEYE_API_KEY and mint:
                 try:
@@ -2250,9 +1839,11 @@ async def token_callback_handler(cb: CallbackQuery):
                     mkts = await birdeye_markets(session, mint)
                 except Exception:
                     mkts = None
+                try:
+                    security_info = await birdeye_token_security(session, mint)
+                except Exception:
+                    security_info = None
             
-            if not extra:
-                extra = await dexscreener_token(session, mint)
 
             p = {
                 "baseToken": {
@@ -2267,35 +1858,17 @@ async def token_callback_handler(cb: CallbackQuery):
                 "pairCreatedAt": (extra or {}).get("createdAt") or (extra or {}).get("firstTradeAt"),
                 "chainId": "solana",
             }
-
-            if p.get("priceUsd") is None and mint:
-                try:
-                    jp = await jupiter_price(session, mint)
-                    if jp is not None:
-                        p["priceUsd"] = jp
-                except Exception:
-                    pass
-
-    helius_info = None
-    topk_share = None
-    if mode == "details":
-        async with aiohttp.ClientSession() as session:
-            try:
-                helius_info = await helius_get_mint_info(session, mint)
-            except Exception:
-                helius_info = None
-            try:
-                topk_share = await helius_top_holders_share(session, mint, k=10)
-            except Exception:
-                topk_share = None
+            
+            if security_info:
+                topk_share = security_info.get("top10HolderPercent") or security_info.get("top10_holder_percent")
 
     try:
         if mode == "details":
-            text = build_details_text(p, extra, mkts, helius_info, topk_share, is_pro)
+            text = build_details_text(p, extra, mkts, security_info, topk_share, is_pro)
             kb = token_keyboard(p, mode="details")
         else:
-            mint_active = helius_info.get("mintAuthority") is not None if helius_info else False
-            freeze_active = helius_info.get("freezeAuthority") is not None if helius_info else False
+            mint_active = security_info.get("mintAuthority") is not None if security_info else False
+            freeze_active = security_info.get("freezeAuthority") is not None if security_info else False
             text = build_summary_text(p, extra, mkts, is_pro, mint_active, freeze_active, topk_share)
             kb = token_keyboard(p, mode="summary")
 
@@ -2350,36 +1923,23 @@ async def scan_cb_handler(cb: CallbackQuery):
         async with aiohttp.ClientSession() as session:
             extra = None
             mkts = None
-            helius_info = None
+            security_info = None
             topk_share = None
             
             if BIRDEYE_API_KEY and mint:
                 try:
-                    extra, mkts = await asyncio.gather(
+                    extra, mkts, security_info = await asyncio.gather(
                         birdeye_overview(session, mint),
                         birdeye_markets(session, mint),
+                        birdeye_token_security(session, mint),
                     )
                 except Exception:
-                    extra, mkts = None, None
+                    extra, mkts, security_info = None, None, None
             
-            if HELIUS_RPC_URL and mint:
-                try:
-                    helius_info, topk_share = await asyncio.gather(
-                        helius_get_mint_info(session, mint),
-                        helius_top_holders_share(session, mint),
-                    )
-                except Exception:
-                    helius_info, topk_share = None, None
-            
-            if (p.get("priceUsd") is None) and mint:
-                try:
-                    jp = await jupiter_price(session, mint)
-                    if jp is not None:
-                        p["priceUsd"] = jp
-                except Exception:
-                    pass
+            if security_info:
+                topk_share = security_info.get("top10HolderPercent") or security_info.get("top10_holder_percent")
 
-        text = build_full_token_text(p, extra, mkts, helius_info, topk_share, is_pro)
+        text = build_full_token_text(p, extra, mkts, security_info, topk_share, is_pro)
         kb = scan_nav_kb(sid, idx, mint, user_id)
 
         try:
@@ -2397,36 +1957,23 @@ async def scan_cb_handler(cb: CallbackQuery):
     async with aiohttp.ClientSession() as session:
         extra = None
         mkts = None
-        helius_info = None
+        security_info = None
         topk_share = None
         
         if BIRDEYE_API_KEY and mint:
             try:
-                extra, mkts = await asyncio.gather(
+                extra, mkts, security_info = await asyncio.gather(
                     birdeye_overview(session, mint),
                     birdeye_markets(session, mint),
+                    birdeye_token_security(session, mint),
                 )
             except Exception:
-                extra, mkts = None, None
+                extra, mkts, security_info = None, None, None
         
-        if HELIUS_RPC_URL and mint:
-            try:
-                helius_info, topk_share = await asyncio.gather(
-                    helius_get_mint_info(session, mint),
-                    helius_top_holders_share(session, mint),
-                )
-            except Exception:
-                helius_info, topk_share = None, None
-        
-        if (p.get("priceUsd") is None) and mint:
-            try:
-                jp = await jupiter_price(session, mint)
-                if jp is not None:
-                    p["priceUsd"] = jp
-            except Exception:
-                pass
+        if security_info:
+            topk_share = security_info.get("top10HolderPercent") or security_info.get("top10_holder_percent")
 
-    text = build_full_token_text(p, extra, mkts, helius_info, topk_share, is_pro)
+    text = build_full_token_text(p, extra, mkts, security_info, topk_share, is_pro)
     kb = scan_nav_kb(sid, idx, mint, user_id)
 
     try:
@@ -2706,33 +2253,23 @@ async def research_menu_callback_handler(cb: CallbackQuery):
         async with aiohttp.ClientSession() as session:
             extra = None
             mkts = None
-            helius_info = None
+            security_info = None
             topk_share = None
             
             if BIRDEYE_API_KEY and mint:
                 try:
-                    extra, mkts = await asyncio.gather(
+                    extra, mkts, security_info = await asyncio.gather(
                         birdeye_overview(session, mint),
                         birdeye_markets(session, mint),
+                        birdeye_token_security(session, mint),
                     )
                 except Exception:
-                    extra, mkts = None, None
+                    extra, mkts, security_info = None, None, None
             
-            if HELIUS_RPC_URL and mint:
-                try:
-                    helius_info, topk_share = await asyncio.gather(
-                        helius_get_mint_info(session, mint),
-                        helius_top_holders_share(session, mint),
-                    )
-                except Exception:
-                    helius_info, topk_share = None, None
-            
-            if p.get("priceUsd") is None and mint:
-                jp = await jupiter_price(session, mint)
-                if jp is not None:
-                    p["priceUsd"] = jp
+            if security_info:
+                topk_share = security_info.get("top10HolderPercent") or security_info.get("top10_holder_percent")
         
-        text = build_full_token_text(p, extra, mkts, helius_info, topk_share, is_pro)
+        text = build_full_token_text(p, extra, mkts, security_info, topk_share, is_pro)
         kb = scan_nav_kb(sid, 0, mint, user_id)
         
         try:
@@ -3092,10 +2629,6 @@ async def text_input_handler(m: Message):
         
         async with aiohttp.ClientSession() as session:
             p = await fetch_pair_data(session, mint)
-            if not p:
-                p_fallback = await dexscreener_token_fallback(session, mint)
-                if p_fallback:
-                    p = p_fallback
             
             if not p:
                 log_command(user_id, "/token", mint, ok=False, err="not_found")
@@ -3104,11 +2637,11 @@ async def text_input_handler(m: Message):
             
             extra = await birdeye_overview(session, mint) if BIRDEYE_API_KEY and mint else None
             mkts = await birdeye_markets(session, mint) if BIRDEYE_API_KEY and mint else None
-            helius_info = await helius_get_mint_info(session, mint) if HELIUS_RPC_URL and mint else None
-            topk_share = await helius_top_holders_share(session, mint) if HELIUS_RPC_URL and mint else None
+            security_info = await birdeye_token_security(session, mint) if BIRDEYE_API_KEY and mint else None
+            topk_share = security_info.get("top10HolderPercent") or security_info.get("top10_holder_percent") if security_info else None
         
         is_pro = is_pro_user(user_id)
-        text = build_full_token_text(p, extra, mkts, helius_info, topk_share, is_pro)
+        text = build_full_token_text(p, extra, mkts, security_info, topk_share, is_pro)
         kb = token_keyboard(p, user_id=user_id)
         
         try:
