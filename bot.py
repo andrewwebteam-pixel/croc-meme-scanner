@@ -598,7 +598,7 @@ def normalize_mint_arg(raw: str) -> Optional[str]:
 
 async def fetch_latest_sol_pairs(limit: int = 8, user_filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """
-    Fetch new Solana token listings using Birdeye Token List V3 API.
+    Fetch new Solana token listings using Birdeye /defi/v2/tokens/new_listing endpoint.
     Fetches overview + security data for each token and applies all user filters.
     Returns up to 'limit' newest tokens that match filter criteria.
     """
@@ -612,14 +612,12 @@ async def fetch_latest_sol_pairs(limit: int = 8, user_filters: Optional[Dict[str
         "x-chain": "solana"
     }
 
-    # Fetch recent token listings - sort by volume to get active tokens
-    # We'll sort by creation time after fetching
-    url_tokenlist = f"{BIRDEYE_BASE}/defi/v3/token/list"
+    # Fetch new token listings using Birdeye's new_listing endpoint
+    url_tokenlist = f"{BIRDEYE_BASE}/defi/v2/tokens/new_listing"
     params_tokenlist = {
-        "sort_by": "v24hUSD",  # Use valid parameter
-        "sort_type": "desc",
-        "offset": 0,
-        "limit": 50  # Fetch more to find recent listings
+        "chain": "sol",  # Solana chain
+        "limit": 20,     # Fetch 20 newest tokens
+        "offset": 0
     }
     
     token_addresses = []
@@ -629,46 +627,39 @@ async def fetch_latest_sol_pairs(limit: int = 8, user_filters: Optional[Dict[str
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
             async with s.get(url_tokenlist, headers=headers, params=params_tokenlist) as r:
                 status = r.status
-                print(f"[SCAN] Birdeye /defi/v3/token/list status={status}")
+                print(f"[SCAN] Birdeye /defi/v2/tokens/new_listing status={status}")
                 if status in [400, 401, 403, 429]:
-                    print(f"[SCAN] /defi/v3/token/list returned {status} - check API key or plan limits")
+                    print(f"[SCAN] /defi/v2/tokens/new_listing returned {status} - check API key or plan limits")
                     return []
                 elif status == 200:
                     try:
                         j = await r.json()
                         if j and j.get("success"):
                             data = j.get("data") or {}
-                            tokens = data.get("tokens") if isinstance(data, dict) else data
+                            # The new_listing endpoint returns tokens in 'items' or 'tokens' array
+                            tokens = data.get("items") or data.get("tokens") or []
                             if tokens and isinstance(tokens, list):
-                                # Sort by listing/creation time to get newest tokens
-                                tokens_with_time = []
+                                # Extract token addresses (already sorted by newest)
                                 for token in tokens:
-                                    addr = token.get("address")
-                                    listing_time = token.get("listingTime") or token.get("createdAt") or 0
+                                    addr = token.get("address") or token.get("mint")
                                     if addr:
-                                        tokens_with_time.append((addr, listing_time))
-                                
-                                # Sort by listing time (newest first)
-                                tokens_with_time.sort(key=lambda x: x[1], reverse=True)
-                                
-                                # Take top 30 newest
-                                token_addresses = [addr for addr, _ in tokens_with_time[:30]]
-                                print(f"[SCAN] Found {len(token_addresses)} token addresses, sorted by newest")
+                                        token_addresses.append(addr)
+                                print(f"[SCAN] Found {len(token_addresses)} new token addresses from Birdeye")
                         else:
-                            print(f"[SCAN] /defi/v3/token/list success==false: {str(j)[:200]}")
+                            print(f"[SCAN] /defi/v2/tokens/new_listing success==false: {str(j)[:200]}")
                             return []
                     except Exception as e:
-                        print(f"[SCAN] /defi/v3/token/list parse error: {e}")
+                        print(f"[SCAN] /defi/v2/tokens/new_listing parse error: {e}")
                         return []
                 else:
                     try:
                         txt = await r.text()
                     except Exception:
                         txt = "<no body>"
-                    print(f"[SCAN] /defi/v3/token/list HTTP {status} -> {txt[:200]}")
+                    print(f"[SCAN] /defi/v2/tokens/new_listing HTTP {status} -> {txt[:200]}")
                     return []
     except Exception as e:
-        print(f"[SCAN] /defi/v3/token/list exception: {e}")
+        print(f"[SCAN] /defi/v2/tokens/new_listing exception: {e}")
         return []
     
     if not token_addresses:
