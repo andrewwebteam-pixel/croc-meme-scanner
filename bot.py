@@ -596,16 +596,12 @@ def normalize_mint_arg(raw: str) -> Optional[str]:
     return m.group(0) if m else None
 
 
-async def fetch_latest_sol_pairs(limit: int = 8) -> List[Dict[str, Any]]:
+async def fetch_latest_sol_pairs(limit: int = 8, user_filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """
-    Fetch fresh Solana pairs using Birdeye Token List V3 API.
-    Uses /defi/v3/token/list with volume sorting to get active recent tokens.
+    Fetch new Solana token listings using Birdeye Token List V3 API.
+    Fetches overview + security data for each token and applies all user filters.
+    Returns up to 'limit' newest tokens that match filter criteria.
     """
-    if (_scan_cache["ts"] + SCAN_CACHE_TTL) > time.time() and _scan_cache["pairs"]:
-        return _scan_cache["pairs"][:limit]
-
-    pairs = []
-
     if not BIRDEYE_API_KEY:
         print("[SCAN] Birdeye: BIRDEYE_API_KEY is empty -> cannot scan")
         return []
@@ -616,14 +612,17 @@ async def fetch_latest_sol_pairs(limit: int = 8) -> List[Dict[str, Any]]:
         "x-chain": "solana"
     }
 
+    # Fetch recent token listings - sort by volume to get active tokens
+    # We'll sort by creation time after fetching
     url_tokenlist = f"{BIRDEYE_BASE}/defi/v3/token/list"
     params_tokenlist = {
-        "sort_by": "v24hUSD",
+        "sort_by": "v24hUSD",  # Use valid parameter
         "sort_type": "desc",
         "offset": 0,
-        "limit": 50,
-        "min_liquidity": 1000
+        "limit": 50  # Fetch more to find recent listings
     }
+    
+    token_addresses = []
     
     try:
         await api_rate_limit()
@@ -633,6 +632,7 @@ async def fetch_latest_sol_pairs(limit: int = 8) -> List[Dict[str, Any]]:
                 print(f"[SCAN] Birdeye /defi/v3/token/list status={status}")
                 if status in [400, 401, 403, 429]:
                     print(f"[SCAN] /defi/v3/token/list returned {status} - check API key or plan limits")
+                    return []
                 elif status == 200:
                     try:
                         j = await r.json()
@@ -640,46 +640,130 @@ async def fetch_latest_sol_pairs(limit: int = 8) -> List[Dict[str, Any]]:
                             data = j.get("data") or {}
                             tokens = data.get("tokens") if isinstance(data, dict) else data
                             if tokens and isinstance(tokens, list):
-                                for token in tokens[:50]:
-                                    try:
-                                        base = {
-                                            "symbol": token.get("symbol") or "",
-                                            "name": token.get("name") or "",
-                                            "address": token.get("address") or ""
-                                        }
-                                        pairs.append({
-                                            "baseToken": base,
-                                            "priceUsd": token.get("price"),
-                                            "liquidity": {"usd": token.get("liquidity")},
-                                            "fdv": token.get("fdv") or token.get("mc"),
-                                            "volume": {"h24": token.get("v24hUSD")},
-                                            "pairCreatedAt": token.get("listingTime"),
-                                            "chainId": "solana",
-                                        })
-                                    except Exception as e:
-                                        print(f"[SCAN] token build error: {e}")
-                                        continue
-                                print(f"[SCAN] /defi/v3/token/list returned {len(pairs)} tokens")
+                                # Sort by listing/creation time to get newest tokens
+                                tokens_with_time = []
+                                for token in tokens:
+                                    addr = token.get("address")
+                                    listing_time = token.get("listingTime") or token.get("createdAt") or 0
+                                    if addr:
+                                        tokens_with_time.append((addr, listing_time))
+                                
+                                # Sort by listing time (newest first)
+                                tokens_with_time.sort(key=lambda x: x[1], reverse=True)
+                                
+                                # Take top 30 newest
+                                token_addresses = [addr for addr, _ in tokens_with_time[:30]]
+                                print(f"[SCAN] Found {len(token_addresses)} token addresses, sorted by newest")
                         else:
                             print(f"[SCAN] /defi/v3/token/list success==false: {str(j)[:200]}")
+                            return []
                     except Exception as e:
                         print(f"[SCAN] /defi/v3/token/list parse error: {e}")
+                        return []
                 else:
                     try:
                         txt = await r.text()
                     except Exception:
                         txt = "<no body>"
                     print(f"[SCAN] /defi/v3/token/list HTTP {status} -> {txt[:200]}")
+                    return []
     except Exception as e:
         print(f"[SCAN] /defi/v3/token/list exception: {e}")
+        return []
     
-    if pairs:
-        _scan_cache["ts"] = time.time()
-        _scan_cache["pairs"] = pairs
-        print(f"[SCAN] Successfully cached {len(pairs)} tokens")
-        return pairs[:limit]
+    if not token_addresses:
+        print("[SCAN] No token addresses found")
+        return []
     
-    return []
+    # Fetch overview + security for each token and apply filters
+    filtered_pairs = []
+    now = datetime.now(timezone.utc)
+    
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+        for mint in token_addresses:
+            try:
+                # Fetch overview and security data
+                overview, security = await asyncio.gather(
+                    birdeye_overview(session, mint),
+                    birdeye_token_security(session, mint),
+                    return_exceptions=True
+                )
+                
+                if isinstance(overview, Exception) or isinstance(security, Exception):
+                    print(f"[SCAN] Error fetching data for {mint[:8]}: {overview if isinstance(overview, Exception) else security}")
+                    continue
+                
+                if not overview:
+                    continue
+                
+                # Build pair object with all data
+                pair = {
+                    "baseToken": {
+                        "symbol": overview.get("symbol") or "",
+                        "name": overview.get("name") or "",
+                        "address": mint
+                    },
+                    "priceUsd": overview.get("price"),
+                    "liquidity": {"usd": overview.get("liquidity")},
+                    "fdv": overview.get("fdv") or overview.get("mc"),
+                    "volume": {"h24": overview.get("v24hUSD")},
+                    "pairCreatedAt": overview.get("createdAt") or overview.get("listingTime"),
+                    "chainId": "solana",
+                }
+                
+                # Apply filters if provided
+                if user_filters:
+                    # Liquidity filter
+                    min_liq = user_filters.get("min_liq")
+                    if min_liq is not None:
+                        liq = pair.get("liquidity", {}).get("usd")
+                        if liq is None or liq < min_liq:
+                            continue
+                    
+                    # Volume filter
+                    min_vol = user_filters.get("min_vol")
+                    if min_vol is not None:
+                        vol = pair.get("volume", {}).get("h24")
+                        if vol is None or vol < min_vol:
+                            continue
+                    
+                    # Age filter
+                    max_age_h = user_filters.get("max_age_h")
+                    if max_age_h is not None:
+                        created = pair.get("pairCreatedAt")
+                        if created:
+                            created_dt = from_unix_ms(created) if isinstance(created, (int, float)) else None
+                            if created_dt:
+                                age_h = (now - created_dt).total_seconds() / 3600
+                                if age_h > max_age_h:
+                                    continue
+                            else:
+                                continue
+                        else:
+                            continue
+                    
+                    # Top-10 holder share filter
+                    min_top10 = user_filters.get("min_top10")
+                    if min_top10 is not None and security:
+                        top10_share = security.get("top10HolderPercent") or security.get("top10_holder_percent")
+                        if top10_share is None or top10_share < min_top10:
+                            continue
+                
+                filtered_pairs.append(pair)
+                
+                # Stop if we have enough tokens
+                if len(filtered_pairs) >= limit:
+                    break
+                    
+            except Exception as e:
+                print(f"[SCAN] Error processing token {mint[:8]}: {e}")
+                continue
+    
+    # Sort by creation time (newest first)
+    filtered_pairs.sort(key=lambda x: x.get("pairCreatedAt", 0), reverse=True)
+    
+    print(f"[SCAN] Returning {len(filtered_pairs)} filtered tokens")
+    return filtered_pairs[:limit]
 
 async def birdeye_overview(session: aiohttp.ClientSession, mint: str) -> Optional[Dict[str, Any]]:
     if not BIRDEYE_API_KEY:
@@ -1436,21 +1520,18 @@ async def scan_handler(m: Message):
 
     status = await m.answer(T("scan_progress", i=0, n=0), **MSG_KW)
 
-    pairs = await fetch_latest_sol_pairs(limit=20)
+    # Get user filters and pass to fetch function
+    user_filters = get_user_filters(user_id)
+    pairs = await fetch_latest_sol_pairs(limit=8, user_filters=user_filters)
 
     if not pairs:
-        log_command(user_id, "/scan", "", ok=False, err="no_pairs")
-        await status.edit_text(T("no_pairs_all_sources"), **MSG_KW)
-        return
-    
-    # Apply user filters
-    user_filters = get_user_filters(user_id)
-    if user_filters:
-        pairs = apply_filters_to_pairs(pairs, user_filters)
-        if not pairs:
+        if user_filters:
             log_command(user_id, "/scan", "", ok=False, err="no_pairs_filtered")
             await status.edit_text(T("no_pairs_filtered"), **MSG_KW)
-            return
+        else:
+            log_command(user_id, "/scan", "", ok=False, err="no_pairs")
+            await status.edit_text(T("no_pairs_all_sources"), **MSG_KW)
+        return
 
     _cleanup_scan_sessions()
     sid = _new_sid()
