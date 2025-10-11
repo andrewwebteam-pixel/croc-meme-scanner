@@ -496,40 +496,56 @@ def get_last_scan_ts(user_id: int) -> int:
     return int(row[0]) if row else 0
 
 def apply_filters_to_pairs(pairs: List[Dict[str, Any]], filters: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Apply user filters to pairs list"""
+    """Apply user filters to pairs list, sort by creation time, and limit to 8 pairs"""
     if not filters:
-        return pairs
+        # No filters, just sort and limit
+        sorted_pairs = sorted(pairs, key=lambda x: x.get("pairCreatedAt", 0), reverse=True)
+        return sorted_pairs[:8]
     
     filtered = []
+    now = datetime.now(timezone.utc)
+    
     for p in pairs:
-        # Check liquidity filter
-        if filters.get("min_liq"):
+        # Check liquidity filter (min_liq)
+        min_liq = filters.get("min_liq")
+        if min_liq is not None:
             liq = (p.get("liquidity") or {}).get("usd")
-            if liq is None or liq < filters["min_liq"]:
+            if liq is None or liq < min_liq:
                 continue
         
-        # Check volume filter
-        if filters.get("min_vol"):
+        # Check volume filter (min_vol)
+        min_vol = filters.get("min_vol")
+        if min_vol is not None:
             vol = (p.get("volume") or {}).get("h24")
-            if vol is None or vol < filters["min_vol"]:
+            if vol is None or vol < min_vol:
                 continue
         
-        # Check age filter
-        if filters.get("max_age_h"):
+        # Check age filter (max_age_h)
+        max_age_h = filters.get("max_age_h")
+        if max_age_h is not None:
             created = p.get("pairCreatedAt")
             if created:
                 created_dt = from_unix_ms(created) if isinstance(created, (int, float)) else None
                 if created_dt:
-                    age_h = (datetime.now(timezone.utc) - created_dt).total_seconds() / 3600
-                    if age_h > filters["max_age_h"]:
+                    age_h = (now - created_dt).total_seconds() / 3600
+                    if age_h > max_age_h:
                         continue
+                else:
+                    # If we can't parse creation time and filter is set, skip this pair
+                    continue
+            else:
+                # No creation time and filter is set, skip
+                continue
         
-        # Note: top10 filter requires helius data, can't filter at scan level
-        # It's applied individually in token display
+        # Note: top10 filter (min_top10) requires Helius Premium API data for ALL pairs
+        # This is not cost-effective to fetch during scan, so it's not applied here
+        # Individual token displays will show holder data when available
         
         filtered.append(p)
     
-    return filtered
+    # Sort by creation time (newest first) and limit to 8 pairs
+    sorted_filtered = sorted(filtered, key=lambda x: x.get("pairCreatedAt", 0), reverse=True)
+    return sorted_filtered[:8]
 
 def set_last_scan_ts(user_id: int, ts: int):
     conn = db()
@@ -756,7 +772,7 @@ async def fetch_latest_sol_pairs(limit: int = 8) -> List[Dict[str, Any]]:
                                             from datetime import datetime
                                             try:
                                                 created_ts = int(datetime.fromisoformat(created_at.replace('Z', '+00:00')).timestamp())
-                                            except:
+                                            except (ValueError, AttributeError, TypeError):
                                                 created_ts = 0
                                         else:
                                             created_ts = 0
@@ -1151,6 +1167,12 @@ def extract_holders(data: Dict[str, Any]) -> Optional[int]:
     return None
 
 def extract_lp_lock_ratio(data: Dict[str, Any]) -> Optional[float]:
+    """
+    Extract LP lock ratio from Birdeye data.
+    
+    NOTE: LP lock data requires Birdeye Pro API access. Without Pro tier,
+    this field typically returns None and will show "—" or be hidden for Free users.
+    """
     for k in ("lp_lock_ratio", "lpLockRatio", "lp_locked", "lpLockedRatio"):
         v = data.get(k)
         try:
@@ -1701,6 +1723,13 @@ async def helius_get_mint_info(session: aiohttp.ClientSession, mint: str) -> Opt
     }
 
 async def helius_top_holders_share(session: aiohttp.ClientSession, mint: str, k: int = 10) -> Optional[float]:
+    """
+    Fetch top-K holders concentration percentage using Helius RPC.
+    
+    NOTE: This requires Helius API access (free tier has rate limits). 
+    For production at scale, consider Helius Premium to avoid rate limits.
+    Returns percentage of total supply held by top K holders.
+    """
     j = await helius_rpc(session, "getTokenLargestAccounts", [mint, {"commitment": "finalized"}])
     if not j or "result" not in j:
         return None
@@ -2307,8 +2336,60 @@ async def scan_cb_handler(cb: CallbackQuery):
         await cb.answer(T("no_data"))
         return
 
-    if idx < 0: idx = 0
-    if idx >= len(pairs): idx = len(pairs) - 1
+    # Check if user is trying to navigate beyond bounds
+    if idx < 0:
+        idx = 0
+        await cb.answer("📍 Already at first pair")
+    elif idx >= len(pairs):
+        idx = len(pairs) - 1
+        await cb.answer("📍 No more pairs available")
+        # Keep session alive, just show message
+        p = pairs[idx]
+        mint = (p.get("baseToken") or {}).get("address", "")
+        
+        async with aiohttp.ClientSession() as session:
+            extra = None
+            mkts = None
+            helius_info = None
+            topk_share = None
+            
+            if BIRDEYE_API_KEY and mint:
+                try:
+                    extra, mkts = await asyncio.gather(
+                        birdeye_overview(session, mint),
+                        birdeye_markets(session, mint),
+                    )
+                except Exception:
+                    extra, mkts = None, None
+            
+            if HELIUS_RPC_URL and mint:
+                try:
+                    helius_info, topk_share = await asyncio.gather(
+                        helius_get_mint_info(session, mint),
+                        helius_top_holders_share(session, mint),
+                    )
+                except Exception:
+                    helius_info, topk_share = None, None
+            
+            if (p.get("priceUsd") is None) and mint:
+                try:
+                    jp = await jupiter_price(session, mint)
+                    if jp is not None:
+                        p["priceUsd"] = jp
+                except Exception:
+                    pass
+
+        text = build_full_token_text(p, extra, mkts, helius_info, topk_share, is_pro)
+        kb = scan_nav_kb(sid, idx, mint, user_id)
+
+        try:
+            await cb.message.edit_text(text, reply_markup=kb, **MSG_KW)
+        except Exception:
+            pass
+
+        elapsed_ms = int((time.time() - start_time) * 1000)
+        log_command(user_id, f"callback:scan:{action}", f"sid={sid},idx={idx}", ok=True, ms=elapsed_ms)
+        return
 
     p = pairs[idx]
     mint = (p.get("baseToken") or {}).get("address", "")
@@ -2769,7 +2850,7 @@ async def favmenu_callback_handler(cb: CallbackQuery):
 
 @dp.message(Command("alertsmenu"))
 async def alerts_menu_handler(m: Message):
-    """Show alerts menu with inline Add/Remove buttons"""
+    """Show alerts menu with current alerts list and inline Add/Remove buttons"""
     if not m.from_user:
         return
     user_id = m.from_user.id
@@ -2778,12 +2859,36 @@ async def alerts_menu_handler(m: Message):
         await m.answer(T("no_access"), **MSG_KW)
         return
     
+    # Fetch current alerts
+    conn = db()
+    cur = conn.execute("SELECT thresholds FROM alerts WHERE user_id = ?", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+    
+    # Build inline keyboard with Add/Remove buttons
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=T("btn_add_alert"), callback_data="alertmenu:add")],
         [InlineKeyboardButton(text=T("btn_remove_alert"), callback_data="alertmenu:remove")]
     ])
     
-    await m.answer(T("alerts_menu"), reply_markup=kb, **MSG_KW)
+    # Display alerts list or empty message
+    if not row or not row[0]:
+        await m.answer(T("alert_list_empty"), reply_markup=kb, **MSG_KW)
+        return
+    
+    try:
+        thresholds = json.loads(row[0])
+        if not thresholds:
+            await m.answer(T("alert_list_empty"), reply_markup=kb, **MSG_KW)
+            return
+        
+        alert_lines = []
+        for mint, price in thresholds.items():
+            alert_lines.append(f"• `{mint[:8]}...` — ${price}")
+        await m.answer(T("alert_list_header", alerts="\n".join(alert_lines)), reply_markup=kb, **MSG_KW)
+    except Exception as e:
+        print(f"[ALERTS] Parse error in alerts_menu_handler: {e}")
+        await m.answer(T("alert_list_empty"), reply_markup=kb, **MSG_KW)
 
 @dp.callback_query(F.data.startswith("alertmenu:"))
 async def alertmenu_callback_handler(cb: CallbackQuery):
