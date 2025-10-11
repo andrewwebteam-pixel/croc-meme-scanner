@@ -117,7 +117,7 @@ STR = {
     "exchanges_hidden": "Exchanges: Hidden on Free plan",
     "birdeye_header": "Birdeye:",
     "birdeye_empty": "Birdeye: —",
-    "birdeye_item": "- `{key}`: {value}",
+    "birdeye_item": "- `{k}`: {v}",
     "details_mint_auth": "Mint authority: {auth}",
     "details_freeze_auth": "Freeze authority: {auth}",
     "details_top10": "Top-10 holders: {pct}",
@@ -599,8 +599,8 @@ def normalize_mint_arg(raw: str) -> Optional[str]:
 
 async def fetch_latest_sol_pairs(limit: int = 8) -> List[Dict[str, Any]]:
     """
-    Fetch fresh Solana pairs using Birdeye API only.
-    Uses /defi/v2/markets with liquidity sorting to get recent active pairs.
+    Fetch fresh Solana pairs using Birdeye Token List V3 API.
+    Uses /defi/v3/token/list with volume sorting to get active recent tokens.
     """
     if (_scan_cache["ts"] + SCAN_CACHE_TTL) > time.time() and _scan_cache["pairs"]:
         return _scan_cache["pairs"][:limit]
@@ -617,61 +617,67 @@ async def fetch_latest_sol_pairs(limit: int = 8) -> List[Dict[str, Any]]:
         "x-chain": "solana"
     }
 
-    url_markets = f"{BIRDEYE_BASE}/defi/v2/markets"
-    params_markets = {"sort_by": "liquidity", "sort_type": "desc", "offset": 0, "limit": 50}
+    url_tokenlist = f"{BIRDEYE_BASE}/defi/v3/token/list"
+    params_tokenlist = {
+        "sort_by": "v24hUSD",
+        "sort_type": "desc",
+        "offset": 0,
+        "limit": 50,
+        "min_liquidity": 1000
+    }
     
     try:
         await api_rate_limit()
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as s:
-            async with s.get(url_markets, headers=headers, params=params_markets) as r:
+            async with s.get(url_tokenlist, headers=headers, params=params_tokenlist) as r:
                 status = r.status
-                print(f"[SCAN] Birdeye /defi/v2/markets status={status}")
+                print(f"[SCAN] Birdeye /defi/v3/token/list status={status}")
                 if status in [400, 401, 403, 429]:
-                    print(f"[SCAN] /defi/v2/markets returned {status} - check API key or plan limits")
+                    print(f"[SCAN] /defi/v3/token/list returned {status} - check API key or plan limits")
                 elif status == 200:
                     try:
                         j = await r.json()
                         if j and j.get("success"):
                             data = j.get("data") or {}
-                            items = data.get("items") if isinstance(data, dict) else data
-                            if items and isinstance(items, list):
-                                for m in items[:50]:
+                            tokens = data.get("tokens") if isinstance(data, dict) else data
+                            if tokens and isinstance(tokens, list):
+                                for token in tokens[:50]:
                                     try:
                                         base = {
-                                            "symbol": m.get("symbol") or "",
-                                            "name": m.get("name") or "",
-                                            "address": m.get("address") or m.get("baseAddress") or ""
+                                            "symbol": token.get("symbol") or "",
+                                            "name": token.get("name") or "",
+                                            "address": token.get("address") or ""
                                         }
                                         pairs.append({
                                             "baseToken": base,
-                                            "priceUsd": m.get("price"),
-                                            "liquidity": {"usd": m.get("liquidity") or m.get("liquidityUsd")},
-                                            "fdv": m.get("marketCap") or m.get("fdv"),
-                                            "volume": {"h24": m.get("v24hUSD") or m.get("v24h") or m.get("volume24h")},
-                                            "pairCreatedAt": m.get("createdAt") or m.get("firstTradeAt"),
+                                            "priceUsd": token.get("price"),
+                                            "liquidity": {"usd": token.get("liquidity")},
+                                            "fdv": token.get("fdv") or token.get("mc"),
+                                            "volume": {"h24": token.get("v24hUSD")},
+                                            "pairCreatedAt": token.get("listingTime"),
                                             "chainId": "solana",
                                         })
                                     except Exception as e:
-                                        print(f"[SCAN] pair build error: {e}")
+                                        print(f"[SCAN] token build error: {e}")
                                         continue
-                                print(f"[SCAN] /defi/v2/markets returned {len(pairs)} pairs")
+                                print(f"[SCAN] /defi/v3/token/list returned {len(pairs)} tokens")
                         else:
-                            print(f"[SCAN] /defi/v2/markets success==false: {str(j)[:200]}")
+                            print(f"[SCAN] /defi/v3/token/list success==false: {str(j)[:200]}")
                     except Exception as e:
-                        print(f"[SCAN] /defi/v2/markets parse error: {e}")
+                        print(f"[SCAN] /defi/v3/token/list parse error: {e}")
                 else:
                     try:
                         txt = await r.text()
                     except Exception:
                         txt = "<no body>"
-                    print(f"[SCAN] /defi/v2/markets HTTP {status} -> {txt[:200]}")
+                    print(f"[SCAN] /defi/v3/token/list HTTP {status} -> {txt[:200]}")
     except Exception as e:
-        print(f"[SCAN] /defi/v2/markets exception: {e}")
+        print(f"[SCAN] /defi/v3/token/list exception: {e}")
     
     if pairs:
         _scan_cache["ts"] = time.time()
         _scan_cache["pairs"] = pairs
-        print(f"[SCAN] Successfully cached {len(pairs)} pairs")
+        print(f"[SCAN] Successfully cached {len(pairs)} tokens")
         return pairs[:limit]
     
     return []
@@ -1082,7 +1088,7 @@ def birdeye_kv_block(extra: Optional[Dict[str, Any]]) -> str:
 
     lines = [T("birdeye_header")]
     for item_key, item_val in simple_items[:6]:
-        lines.append(T("birdeye_item", key=item_key, value=item_val))
+        lines.append(T("birdeye_item", k=item_key, v=item_val))
     return "\n".join(lines)
 
 def format_authority(auth: Optional[str]) -> str:
