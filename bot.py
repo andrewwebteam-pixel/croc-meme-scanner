@@ -311,7 +311,7 @@ def T(key: str, **kwargs) -> str:
     return STR.get(key, key).format(**kwargs)
 
 
-MSG_KW = dict(parse_mode="Markdown", disable_web_page_preview=True)
+MSG_KW: Dict[str, Any] = {"parse_mode": "Markdown", "disable_web_page_preview": True}
 
 SCAN_CACHE_TTL = 15
 _scan_cache: Dict[str, Any] = {"ts": 0.0, "pairs": []}
@@ -775,7 +775,7 @@ def format_usd(v: Optional[float]) -> str:
     return f"{curr}{v:.6f}"
 
 
-def from_unix_ms(ms: Optional[int]) -> Optional[datetime]:
+def from_unix_ms(ms: Optional[int | float]) -> Optional[datetime]:
     if not ms: return None
     ts = float(ms)
     if ts > 10_000_000_000:
@@ -968,12 +968,22 @@ async def fetch_latest_sol_pairs(
             fdv = overview.get("fdv") or overview.get("mc") or overview.get("marketCap") or 0
             volume = overview.get("v24hUSD") or overview.get("volume") or 0
             
-            # Use creation timestamp from new_listing first, then overview, then current time
-            created_at = (listing_created_at or 
-                         overview.get("createdAt") or 
-                         overview.get("listingTime") or 
-                         overview.get("firstTradeAt") or
-                         int(time.time() * 1000))
+            # Extract creation timestamp properly using helper function
+            created_at_ms = None
+            
+            # First try: extract from overview data using comprehensive helper
+            age_dt = extract_created_at(overview) if overview else None
+            if age_dt:
+                created_at_ms = int(age_dt.timestamp() * 1000)
+            # Fallback: use raw listing timestamp if available
+            elif listing_created_at:
+                created_at_ms = int(listing_created_at) if isinstance(listing_created_at, (int, float)) else None
+            # Final fallback: None (will show "—" in display)
+            
+            # Extract Top-10 holders percentage from security data
+            top10_pct = None
+            if security:
+                top10_pct = extract_top10_holders(security)
             
             pair = {
                 "baseToken": {
@@ -985,7 +995,8 @@ async def fetch_latest_sol_pairs(
                 "liquidity": {"usd": liquidity},
                 "fdv": fdv,
                 "volume": {"h24": volume},
-                "pairCreatedAt": created_at,
+                "pairCreatedAt": created_at_ms,  # Now properly normalized to Unix ms or None
+                "top10_pct": top10_pct,  # Explicitly set (value or None)
                 "chainId": "solana",
             }
             
@@ -994,7 +1005,8 @@ async def fetch_latest_sol_pairs(
                 pair["security"] = security
             
             all_pairs.append(pair)
-            print(f"[SCAN] Built pair for {symbol}: liq=${liquidity}, vol=${volume}, age={human_age(from_unix_ms(created_at))}")
+            age_str = human_age(from_unix_ms(created_at_ms)) if created_at_ms else "—"
+            print(f"[SCAN] Built pair for {symbol}: liq=${liquidity}, vol=${volume}, age={age_str}, top10={top10_pct if top10_pct else '—'}%")
     
     print(f"[SCAN] Built {len(all_pairs)} pairs, applying filters...")
     
@@ -1055,8 +1067,8 @@ async def fetch_latest_sol_pairs(
         # No filters, just return all pairs
         filtered_pairs = all_pairs
     
-    # Sort by creation time (newest first)
-    filtered_pairs.sort(key=lambda x: x.get("pairCreatedAt", 0), reverse=True)
+    # Sort by creation time (newest first), handle None values
+    filtered_pairs.sort(key=lambda x: x.get("pairCreatedAt") or 0, reverse=True)
     
     print(f"[SCAN] Returning {len(filtered_pairs[:limit])} filtered tokens")
     return filtered_pairs[:limit]
@@ -1284,7 +1296,7 @@ def extract_lp_lock_ratio(data: Dict[str, Any]) -> Optional[float]:
 
 def extract_created_at(data: Dict[str, Any]) -> Optional[datetime]:
     for k in ("createdAt", "created_at", "firstTradeAt", "first_trade_at",
-              "first_trade_unix", "firstTradeUnixTime"):
+              "first_trade_unix", "firstTradeUnixTime", "lastTradeUnixTime"):
         v = data.get(k)
         if v is None: continue
         try:
@@ -2020,21 +2032,21 @@ async def token_handler(m: Message):
                                            birdeye_price(session, mint),
                                            return_exceptions=True)
             extra = results[0] if not isinstance(results[0],
-                                                 Exception) else None
+                                                 BaseException) else None
             security_info = results[1] if not isinstance(
-                results[1], Exception) else None
+                results[1], BaseException) else None
             mkts = results[2] if not isinstance(results[2],
-                                                Exception) else None
+                                                BaseException) else None
             birdeye_price_val = results[3] if not isinstance(
-                results[3], Exception) else None
+                results[3], BaseException) else None
 
         if not extra:
             print(f"[TOKEN] Birdeye failed for {mint[:8]}...")
 
-        if security_info and extra:
+        if security_info and extra and isinstance(security_info, dict) and isinstance(extra, dict):
             extra.update(security_info)
 
-        if security_info:
+        if security_info and isinstance(security_info, dict):
             topk_share = extract_top10_holders(security_info)
 
         p = {
@@ -2352,7 +2364,7 @@ async def alerts_handler(m: Message):
 
 @dp.callback_query(F.data.startswith("token:"))
 async def token_callback_handler(cb: CallbackQuery):
-    if not cb.from_user or not cb.message:
+    if not cb.from_user or not cb.message or not cb.data:
         return
     start_time = time.time()
     try:
@@ -2424,7 +2436,7 @@ async def token_callback_handler(cb: CallbackQuery):
         if mode == "details":
             text = build_details_text(p, extra, mkts, security_info,
                                       topk_share, is_pro)
-            kb = token_keyboard(p, mode="details")
+            kb = token_keyboard(p, user_id=user_id)
         else:
             mint_active = security_info.get(
                 "mintAuthority") is not None if security_info else False
@@ -2432,9 +2444,10 @@ async def token_callback_handler(cb: CallbackQuery):
                 "freezeAuthority") is not None if security_info else False
             text = build_summary_text(p, extra, mkts, is_pro, mint_active,
                                       freeze_active, topk_share)
-            kb = token_keyboard(p, mode="summary")
+            kb = token_keyboard(p, user_id=user_id)
 
-        await cb.message.edit_text(text, reply_markup=kb, **MSG_KW)
+        if isinstance(cb.message, Message):
+            await cb.message.edit_text(text, reply_markup=kb, **MSG_KW)
     except Exception:
         pass
 
@@ -2450,7 +2463,7 @@ async def token_callback_handler(cb: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("scan:session:"))
 async def scan_cb_handler(cb: CallbackQuery):
-    if not cb.from_user or not cb.message:
+    if not cb.from_user or not cb.message or not cb.data:
         return
     start_time = time.time()
     try:
@@ -2510,10 +2523,11 @@ async def scan_cb_handler(cb: CallbackQuery):
                                      is_pro)
         kb = scan_nav_kb(sid, idx, mint, user_id, max_idx=len(pairs))
 
-        try:
-            await cb.message.edit_text(text, reply_markup=kb, **MSG_KW)
-        except Exception:
-            pass
+        if isinstance(cb.message, Message):
+            try:
+                await cb.message.edit_text(text, reply_markup=kb, **MSG_KW)
+            except Exception:
+                pass
 
         elapsed_ms = int((time.time() - start_time) * 1000)
         log_command(user_id,
@@ -2549,10 +2563,11 @@ async def scan_cb_handler(cb: CallbackQuery):
                                  is_pro)
     kb = scan_nav_kb(sid, idx, mint, user_id, max_idx=len(pairs))
 
-    try:
-        await cb.message.edit_text(text, reply_markup=kb, **MSG_KW)
-    except Exception:
-        await cb.message.answer(text, reply_markup=kb, **MSG_KW)
+    if isinstance(cb.message, Message):
+        try:
+            await cb.message.edit_text(text, reply_markup=kb, **MSG_KW)
+        except Exception:
+            await cb.message.answer(text, reply_markup=kb, **MSG_KW)
 
     elapsed_ms = int((time.time() - start_time) * 1000)
     log_command(user_id,
@@ -2566,7 +2581,7 @@ async def scan_cb_handler(cb: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("fav:add:"))
 async def fav_add_callback(cb: CallbackQuery):
-    if not cb.from_user:
+    if not cb.from_user or not cb.data:
         return
     parts = cb.data.split(":")
     if len(parts) < 3:
@@ -2582,7 +2597,7 @@ async def fav_add_callback(cb: CallbackQuery):
     add_favorite(user_id, mint)
     log_command(user_id, "callback:fav:add", mint, ok=True)
 
-    if cb.message and cb.message.reply_markup:
+    if isinstance(cb.message, Message) and cb.message.reply_markup:
         is_scan_context = any(
             "scan:session:" in btn.callback_data
             for row in cb.message.reply_markup.inline_keyboard for btn in row
@@ -2619,7 +2634,7 @@ async def fav_add_callback(cb: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("fav:del:"))
 async def fav_del_callback(cb: CallbackQuery):
-    if not cb.from_user:
+    if not cb.from_user or not cb.data:
         return
     parts = cb.data.split(":")
     if len(parts) < 3:
@@ -2641,7 +2656,7 @@ async def fav_del_callback(cb: CallbackQuery):
 
     log_command(user_id, "callback:fav:del", mint, ok=deleted)
 
-    if cb.message and deleted and cb.message.reply_markup:
+    if isinstance(cb.message, Message) and deleted and cb.message.reply_markup:
         is_scan_context = any(
             "scan:session:" in btn.callback_data
             for row in cb.message.reply_markup.inline_keyboard for btn in row
@@ -2681,7 +2696,7 @@ async def fav_del_callback(cb: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("info:"))
 async def info_callback(cb: CallbackQuery):
-    if not cb.from_user:
+    if not cb.from_user or not cb.data:
         return
     parts = cb.data.split(":")
     if len(parts) < 2:
@@ -2754,7 +2769,7 @@ async def research_handler(m: Message):
 @dp.callback_query(F.data.startswith("researchmenu:"))
 async def research_menu_callback_handler(cb: CallbackQuery):
     """Handle research menu inline button callbacks"""
-    if not cb.from_user or not cb.message:
+    if not cb.from_user or not cb.message or not cb.data:
         return
 
     user_id = cb.from_user.id
@@ -2949,7 +2964,7 @@ async def filters_handler(m: Message):
 @dp.callback_query(F.data.startswith("filter:"))
 async def filter_callback_handler(cb: CallbackQuery):
     """Handle filter selection callbacks"""
-    if not cb.from_user or not cb.message:
+    if not cb.from_user or not cb.message or not cb.data:
         return
 
     user_id = cb.from_user.id
@@ -2958,19 +2973,21 @@ async def filter_callback_handler(cb: CallbackQuery):
     if action == "clear":
         clear_user_filters(user_id)
         await cb.answer(T("filters_cleared_all"))
-        await cb.message.edit_text(
-            f"{T('filters_none')}\n\n{T('filters_menu')}", **MSG_KW)
+        if isinstance(cb.message, Message):
+            await cb.message.edit_text(
+                f"{T('filters_none')}\n\n{T('filters_menu')}", **MSG_KW)
         return
 
-    if action == "liq":
-        _awaiting_filter_liq[user_id] = True
-        await cb.message.answer(T("filter_liq_prompt"), **MSG_KW)
-    elif action == "age":
-        _awaiting_filter_age[user_id] = True
-        await cb.message.answer(T("filter_age_prompt"), **MSG_KW)
-    elif action == "vol":
-        _awaiting_filter_vol[user_id] = True
-        await cb.message.answer(T("filter_vol_prompt"), **MSG_KW)
+    if isinstance(cb.message, Message):
+        if action == "liq":
+            _awaiting_filter_liq[user_id] = True
+            await cb.message.answer(T("filter_liq_prompt"), **MSG_KW)
+        elif action == "age":
+            _awaiting_filter_age[user_id] = True
+            await cb.message.answer(T("filter_age_prompt"), **MSG_KW)
+        elif action == "vol":
+            _awaiting_filter_vol[user_id] = True
+            await cb.message.answer(T("filter_vol_prompt"), **MSG_KW)
 
     await cb.answer()
 
@@ -3011,7 +3028,7 @@ async def favorites_menu_handler(m: Message):
 @dp.callback_query(F.data.startswith("favmenu:"))
 async def favmenu_callback_handler(cb: CallbackQuery):
     """Handle favorites menu callbacks"""
-    if not cb.from_user or not cb.message:
+    if not cb.from_user or not cb.message or not cb.data:
         return
 
     user_id = cb.from_user.id
@@ -3095,7 +3112,7 @@ async def alerts_menu_handler(m: Message):
 @dp.callback_query(F.data.startswith("copy:"))
 async def copy_mint_callback_handler(cb: CallbackQuery):
     """Handle copy mint address callbacks"""
-    if not cb.from_user:
+    if not cb.from_user or not cb.data or not cb.message:
         return
     
     mint = cb.data.replace("copy:", "")
@@ -3106,7 +3123,7 @@ async def copy_mint_callback_handler(cb: CallbackQuery):
 @dp.callback_query(F.data.startswith("alertmenu:"))
 async def alertmenu_callback_handler(cb: CallbackQuery):
     """Handle alerts menu callbacks"""
-    if not cb.from_user or not cb.message:
+    if not cb.from_user or not cb.message or not cb.data:
         return
 
     user_id = cb.from_user.id
@@ -3180,6 +3197,10 @@ async def text_input_handler(m: Message):
 
             mint = state.get("mint")
             _awaiting_alert_set.pop(user_id, None)
+            
+            if not mint:
+                await m.answer(T("cant_detect_mint"), **MSG_KW)
+                return
 
             conn = db()
             cur = conn.execute(
