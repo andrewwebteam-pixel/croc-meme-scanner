@@ -1629,20 +1629,26 @@ def build_details_text(p: Dict[str, Any], extra: Optional[Dict[str, Any]],
         add_lines.append(T("details_mint_auth", auth=T("fmt_dash")))
         add_lines.append(T("details_freeze_auth", auth=T("fmt_dash")))
 
+    # Always show Top-10 holders line for PRO users (with value or "—")
     if is_pro:
-        if topk_share is not None:
-            add_lines.append(T("details_top10", pct=f_pct(topk_share)))
-        else:
-            add_lines.append(T("details_top10", pct=T("fmt_dash")))
+        pct = topk_share
+        pct_str = f"{pct:.2f}%" if pct is not None else "—"
+        add_lines.append(T("details_top10", pct=pct_str))
     else:
         add_lines.append(T("details_top10_hidden"))
 
     liq_usd = (p.get("liquidity") or {}).get("usd")
     vol24 = (p.get("volume") or {}).get("h24")
     lp_lock = extract_lp_lock_ratio(extra or {}) if extra else None
-    age_dt = extract_created_at(extra) if extra else None
-    if not age_dt:
-        age_dt = from_unix_ms(p.get("pairCreatedAt"))
+    
+    # Extract age from pair["pairCreatedAt"] with explicit datetime conversion
+    created_ts = p.get("pairCreatedAt")
+    if created_ts:
+        age_dt = datetime.fromtimestamp(created_ts, tz=timezone.utc)
+        age_str = human_age(age_dt)
+    else:
+        age_dt = None
+        age_str = "—"
 
     age_hours = (datetime.now(tz=timezone.utc) -
                  age_dt).total_seconds() / 3600 if age_dt else 0
@@ -1663,7 +1669,6 @@ def build_details_text(p: Dict[str, Any], extra: Optional[Dict[str, Any]],
     liq_txt = format_usd(liq_usd)
     fdv_txt = format_usd(p.get("fdv"))
     vol_txt = format_usd(vol24)
-    age_txt = human_age(age_dt)
     holders = extract_holders(extra or {}) if extra else None
 
     core_lines = [
@@ -1672,7 +1677,7 @@ def build_details_text(p: Dict[str, Any], extra: Optional[Dict[str, Any]],
         T("card_liquidity", liq=liq_txt),
         T("card_fdv", fdv=fdv_txt),
         T("card_volume", vol=vol_txt),
-        T("card_age", age=age_txt),
+        T("card_age", age=age_str),
     ]
 
     if is_pro:
@@ -1729,11 +1734,11 @@ def build_full_token_text(p: Dict[str, Any], extra: Optional[Dict[str, Any]],
         add_lines.append(T("details_mint_auth", auth=T("fmt_dash")))
         add_lines.append(T("details_freeze_auth", auth=T("fmt_dash")))
 
+    # Always show Top-10 holders line for PRO users (with value or "—")
     if is_pro:
-        if topk_share is not None:
-            add_lines.append(T("details_top10", pct=f_pct(topk_share)))
-        else:
-            add_lines.append(T("details_top10", pct=T("fmt_dash")))
+        pct = topk_share
+        pct_str = f"{pct:.2f}%" if pct is not None else "—"
+        add_lines.append(T("details_top10", pct=pct_str))
     else:
         add_lines.append(T("details_top10_hidden"))
 
@@ -1741,9 +1746,14 @@ def build_full_token_text(p: Dict[str, Any], extra: Optional[Dict[str, Any]],
     vol24 = (p.get("volume") or {}).get("h24")
     lp_lock = extract_lp_lock_ratio(extra or {}) if extra else None
     
-    # Use pair["pairCreatedAt"] directly (already fetched by fetch_latest_sol_pairs)
-    created_at_ts = p.get("pairCreatedAt")
-    age_dt = from_unix_ms(created_at_ts) if created_at_ts else None
+    # Extract age from pair["pairCreatedAt"] with explicit datetime conversion
+    created_ts = p.get("pairCreatedAt")
+    if created_ts:
+        age_dt = datetime.fromtimestamp(created_ts, tz=timezone.utc)
+        age_str = human_age(age_dt)
+    else:
+        age_dt = None
+        age_str = "—"
 
     age_hours = (datetime.now(tz=timezone.utc) -
                  age_dt).total_seconds() / 3600 if age_dt else 0
@@ -1764,7 +1774,6 @@ def build_full_token_text(p: Dict[str, Any], extra: Optional[Dict[str, Any]],
     liq_txt = format_usd(liq_usd)
     fdv_txt = format_usd(p.get("fdv"))
     vol_txt = format_usd(vol24)
-    age_txt = human_age(age_dt)
     holders = extract_holders(extra or {}) if extra else None
 
     core_lines = [
@@ -1773,7 +1782,7 @@ def build_full_token_text(p: Dict[str, Any], extra: Optional[Dict[str, Any]],
         T("card_liquidity", liq=liq_txt),
         T("card_fdv", fdv=fdv_txt),
         T("card_volume", vol=vol_txt),
-        T("card_age", age=age_txt),
+        T("card_age", age=age_str),
     ]
 
     if is_pro:
