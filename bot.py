@@ -1741,32 +1741,9 @@ def build_full_token_text(p: Dict[str, Any], extra: Optional[Dict[str, Any]],
     vol24 = (p.get("volume") or {}).get("h24")
     lp_lock = extract_lp_lock_ratio(extra or {}) if extra else None
     
-    # Try multiple sources for age timestamp with comprehensive fallbacks
-    age_dt = None
-    
-    # First try: extract from extra (overview data)
-    if extra:
-        age_dt = extract_created_at(extra)
-    
-    # Second try: from p.pairCreatedAt
-    if not age_dt and p.get("pairCreatedAt"):
-        age_dt = from_unix_ms(p.get("pairCreatedAt"))
-    
-    # Third try: check extra for additional timestamp fields directly
-    if not age_dt and extra:
-        for field in ["listingTime", "listing_time", "timeCreated", "time_created"]:
-            val = extra.get(field)
-            if val:
-                age_dt = from_unix_ms(val) if isinstance(val, (int, float)) else None
-                if age_dt:
-                    break
-    
-    # Debug logging for Age display
-    if not age_dt:
-        print(f"[DEBUG AGE] No age_dt found!")
-        print(f"[DEBUG AGE] extra keys: {list(extra.keys()) if extra else 'None'}")
-        print(f"[DEBUG AGE] p dict: {p}")
-        print(f"[DEBUG AGE] p.pairCreatedAt value: {p.get('pairCreatedAt')}, type: {type(p.get('pairCreatedAt'))}")
+    # Use pair["pairCreatedAt"] directly (already fetched by fetch_latest_sol_pairs)
+    created_at_ts = p.get("pairCreatedAt")
+    age_dt = from_unix_ms(created_at_ts) if created_at_ts else None
 
     age_hours = (datetime.now(tz=timezone.utc) -
                  age_dt).total_seconds() / 3600 if age_dt else 0
@@ -1991,25 +1968,23 @@ async def scan_handler(m: Message):
 
     p = pairs[0]
     mint = (p.get("baseToken") or {}).get("address", "")
+    
+    # Use already-fetched top10_pct from pair dict (populated by fetch_latest_sol_pairs)
+    topk_share = p.get("top10_pct")
 
     async with aiohttp.ClientSession() as session:
         extra = None
         mkts = None
-        security_info = None
-        topk_share = None
+        security_info = p.get("security")  # Use already-fetched security if available
 
         if BIRDEYE_API_KEY and mint:
             try:
-                extra, mkts, security_info = await asyncio.gather(
+                extra, mkts = await asyncio.gather(
                     birdeye_overview(session, mint),
                     birdeye_markets(session, mint),
-                    birdeye_token_security(session, mint),
                 )
             except Exception:
-                extra, mkts, security_info = None, None, None
-
-        if security_info:
-            topk_share = extract_top10_holders(security_info)
+                extra, mkts = None, None
 
     text = build_full_token_text(p, extra, mkts, security_info, topk_share,
                                  is_pro)
@@ -2552,25 +2527,23 @@ async def scan_cb_handler(cb: CallbackQuery):
         # Keep session alive, just show message
         p = pairs[idx]
         mint = (p.get("baseToken") or {}).get("address", "")
+        
+        # Use already-fetched data from pair dict
+        topk_share = p.get("top10_pct")
+        security_info = p.get("security")
 
         async with aiohttp.ClientSession() as session:
             extra = None
             mkts = None
-            security_info = None
-            topk_share = None
 
             if BIRDEYE_API_KEY and mint:
                 try:
-                    extra, mkts, security_info = await asyncio.gather(
+                    extra, mkts = await asyncio.gather(
                         birdeye_overview(session, mint),
                         birdeye_markets(session, mint),
-                        birdeye_token_security(session, mint),
                     )
                 except Exception:
-                    extra, mkts, security_info = None, None, None
-
-            if security_info:
-                topk_share = extract_top10_holders(security_info)
+                    extra, mkts = None, None
 
         text = build_full_token_text(p, extra, mkts, security_info, topk_share,
                                      is_pro)
@@ -2592,25 +2565,23 @@ async def scan_cb_handler(cb: CallbackQuery):
 
     p = pairs[idx]
     mint = (p.get("baseToken") or {}).get("address", "")
+    
+    # Use already-fetched data from pair dict
+    topk_share = p.get("top10_pct")
+    security_info = p.get("security")
 
     async with aiohttp.ClientSession() as session:
         extra = None
         mkts = None
-        security_info = None
-        topk_share = None
 
         if BIRDEYE_API_KEY and mint:
             try:
-                extra, mkts, security_info = await asyncio.gather(
+                extra, mkts = await asyncio.gather(
                     birdeye_overview(session, mint),
                     birdeye_markets(session, mint),
-                    birdeye_token_security(session, mint),
                 )
             except Exception:
-                extra, mkts, security_info = None, None, None
-
-        if security_info:
-            topk_share = extract_top10_holders(security_info)
+                extra, mkts = None, None
 
     text = build_full_token_text(p, extra, mkts, security_info, topk_share,
                                  is_pro)
@@ -2931,25 +2902,23 @@ async def research_menu_callback_handler(cb: CallbackQuery):
 
         p = pairs[0]
         mint = (p.get("baseToken") or {}).get("address", "")
+        
+        # Use already-fetched data from pair dict
+        topk_share = p.get("top10_pct")
+        security_info = p.get("security")
 
         async with aiohttp.ClientSession() as session:
             extra = None
             mkts = None
-            security_info = None
-            topk_share = None
 
             if BIRDEYE_API_KEY and mint:
                 try:
-                    extra, mkts, security_info = await asyncio.gather(
+                    extra, mkts = await asyncio.gather(
                         birdeye_overview(session, mint),
                         birdeye_markets(session, mint),
-                        birdeye_token_security(session, mint),
                     )
                 except Exception:
-                    extra, mkts, security_info = None, None, None
-
-            if security_info:
-                topk_share = extract_top10_holders(security_info)
+                    extra, mkts = None, None
 
         text = build_full_token_text(p, extra, mkts, security_info, topk_share,
                                      is_pro)
