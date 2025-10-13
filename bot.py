@@ -919,7 +919,7 @@ async def fetch_latest_sol_pairs(
         print("[SCAN] No token addresses found")
         return []
 
-    # Fetch overview + security for all tokens in parallel for speed
+    # Fetch overview + security + creation time for all tokens in parallel for speed
     print(f"[SCAN] Fetching data for {len(token_addresses)} tokens in parallel...")
     
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
@@ -930,6 +930,7 @@ async def fetch_latest_sol_pairs(
             tasks.append(asyncio.gather(
                 birdeye_overview(session, mint),
                 birdeye_token_security(session, mint),
+                fetch_creation_time(mint),
                 return_exceptions=True
             ))
         
@@ -942,7 +943,7 @@ async def fetch_latest_sol_pairs(
             mint = token_info["address"]
             listing_created_at = token_info.get("created")  # Timestamp from new_listing endpoint
             
-            overview, security = results[i]
+            overview, security, creation_ts = results[i]
             
             # Handle exceptions
             if isinstance(overview, Exception):
@@ -952,6 +953,10 @@ async def fetch_latest_sol_pairs(
             if isinstance(security, Exception):
                 print(f"[SCAN] Security exception for {mint[:8]}: {security} (continuing anyway)")
                 security = None  # Continue without security data
+            
+            if isinstance(creation_ts, Exception):
+                print(f"[SCAN] Creation time exception for {mint[:8]}: {creation_ts} (continuing anyway)")
+                creation_ts = None
             
             # Handle missing or empty overview data gracefully
             if not overview:
@@ -968,17 +973,27 @@ async def fetch_latest_sol_pairs(
             fdv = overview.get("fdv") or overview.get("mc") or overview.get("marketCap") or 0
             volume = overview.get("v24hUSD") or overview.get("volume") or 0
             
-            # Extract creation timestamp properly using helper function
-            created_at_ms = None
+            # Extract creation timestamp properly
+            created_at_ts = None
             
-            # First try: extract from overview data using comprehensive helper
-            age_dt = extract_created_at(overview) if overview else None
-            if age_dt:
-                created_at_ms = int(age_dt.timestamp() * 1000)
+            # First try: use dedicated creation time endpoint
+            if creation_ts:
+                created_at_ts = int(creation_ts)
+                print(f"[SCAN] {mint[:8]}: Using creation_time from dedicated endpoint: {created_at_ts}")
+            # Fallback: extract from overview data using comprehensive helper
+            elif overview:
+                age_dt = extract_created_at(overview)
+                if age_dt:
+                    created_at_ts = int(age_dt.timestamp())
+                    print(f"[SCAN] {mint[:8]}: Using creation_time from overview: {created_at_ts}")
             # Fallback: use raw listing timestamp if available
             elif listing_created_at:
-                created_at_ms = int(listing_created_at) if isinstance(listing_created_at, (int, float)) else None
+                created_at_ts = int(listing_created_at) if isinstance(listing_created_at, (int, float)) else None
+                if created_at_ts:
+                    print(f"[SCAN] {mint[:8]}: Using creation_time from listing: {created_at_ts}")
             # Final fallback: None (will show "—" in display)
+            if not created_at_ts:
+                print(f"[SCAN] {mint[:8]}: No creation timestamp available")
             
             # Extract Top-10 holders percentage from security data
             top10_pct = None
@@ -995,7 +1010,7 @@ async def fetch_latest_sol_pairs(
                 "liquidity": {"usd": liquidity},
                 "fdv": fdv,
                 "volume": {"h24": volume},
-                "pairCreatedAt": created_at_ms,  # Now properly normalized to Unix ms or None
+                "pairCreatedAt": created_at_ts,  # Unix timestamp (seconds) or None
                 "top10_pct": top10_pct,  # Explicitly set (value or None)
                 "chainId": "solana",
             }
@@ -1005,7 +1020,7 @@ async def fetch_latest_sol_pairs(
                 pair["security"] = security
             
             all_pairs.append(pair)
-            age_str = human_age(from_unix_ms(created_at_ms)) if created_at_ms else "—"
+            age_str = human_age(datetime.utcfromtimestamp(created_at_ts)) if created_at_ts else "—"
             print(f"[SCAN] Built pair for {symbol}: liq=${liquidity}, vol=${volume}, age={age_str}, top10={top10_pct if top10_pct else '—'}%")
     
     print(f"[SCAN] Built {len(all_pairs)} pairs, applying filters...")
@@ -1264,6 +1279,40 @@ async def fetch_pair_data(session: aiohttp.ClientSession,
             "solana",
         }
 
+    return None
+
+
+async def fetch_creation_time(mint: str) -> Optional[int]:
+    """
+    Fetch token creation timestamp from Birdeye token_creation_info endpoint,
+    with DexScreener fallback. Returns Unix timestamp (seconds) or None.
+    """
+    url = f"{BIRDEYE_BASE}/defi/token_creation_info"
+    params = {"address": mint}
+    headers = {"X-API-KEY": BIRDEYE_API_KEY, "x-chain": "solana"}
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    data = (await resp.json()).get("data")
+                    if data and data.get("created_at"):
+                        return int(data["created_at"])
+    except Exception as e:
+        print(f"[BIRDEYE] token_creation_info failed for {mint[:8]}...: {e}")
+    
+    url_ds = f"https://api.dexscreener.com/latest/dex/tokens/{mint}"
+    try:
+        async with aiohttp.ClientSession() as ds:
+            async with ds.get(url_ds, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                if r.status == 200:
+                    js = await r.json()
+                    ts = js.get("pairCreatedAt") or js.get("listingTime")
+                    if ts:
+                        return int(ts) // 1000
+    except Exception as e:
+        print(f"[DEXSCREENER] creation_time failed for {mint[:8]}...: {e}")
+    
     return None
 
 
@@ -2024,12 +2073,14 @@ async def token_handler(m: Message):
         birdeye_price_val = None
         topk_share = None
 
+        creation_ts = None
         if BIRDEYE_API_KEY:
             results = await asyncio.gather(birdeye_overview(session, mint),
                                            birdeye_token_security(
                                                session, mint),
                                            birdeye_markets(session, mint),
                                            birdeye_price(session, mint),
+                                           fetch_creation_time(mint),
                                            return_exceptions=True)
             extra = results[0] if not isinstance(results[0],
                                                  BaseException) else None
@@ -2039,6 +2090,8 @@ async def token_handler(m: Message):
                                                 BaseException) else None
             birdeye_price_val = results[3] if not isinstance(
                 results[3], BaseException) else None
+            creation_ts = results[4] if not isinstance(
+                results[4], BaseException) else None
 
         if not extra:
             print(f"[TOKEN] Birdeye failed for {mint[:8]}...")
@@ -2066,7 +2119,7 @@ async def token_handler(m: Message):
                 "h24": (extra or {}).get("v24hUSD")
                 or (extra or {}).get("v24h") or (extra or {}).get("volume24h")
             },
-            "pairCreatedAt": (extra or {}).get("createdAt")
+            "pairCreatedAt": creation_ts or (extra or {}).get("createdAt")
             or (extra or {}).get("firstTradeAt")
             or (extra or {}).get("firstTradeUnixTime")
             or (extra or {}).get("pairCreatedAt"),
