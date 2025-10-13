@@ -1020,7 +1020,7 @@ async def fetch_latest_sol_pairs(
                 pair["security"] = security
             
             all_pairs.append(pair)
-            age_str = human_age(datetime.utcfromtimestamp(created_at_ts)) if created_at_ts else "—"
+            age_str = human_age(datetime.fromtimestamp(created_at_ts, tz=timezone.utc)) if created_at_ts else "—"
             print(f"[SCAN] Built pair for {symbol}: liq=${liquidity}, vol=${volume}, age={age_str}, top10={top10_pct if top10_pct else '—'}%")
     
     print(f"[SCAN] Built {len(all_pairs)} pairs, applying filters...")
