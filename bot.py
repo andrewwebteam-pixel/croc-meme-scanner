@@ -42,7 +42,7 @@ STR = {
     "no_pairs":
     "😕 No fresh pairs available via Birdeye on the current plan.\nTry `/token <mint>` or upgrade your data plan.",
     "scan_progress":
-    "🔍 Scanning Solana pairs… ({i}/{n})",
+    "🔍 Scanning Solana pairs… ({i}/{n})\n⏱ Please wait 10-15 seconds for new listings.",
     "start":
     "Welcome to the {product} bot! Use /help to see commands.",
     "help":
@@ -2056,8 +2056,16 @@ async def token_handler(m: Message):
 
     try:
         await status.edit_text(text, reply_markup=kb, **MSG_KW)
-    except Exception:
-        await m.answer(text, reply_markup=kb, **MSG_KW)
+    except Exception as e:
+        print(f"[TOKEN] /token handler: Failed to edit message: {e}")
+        print(f"[TOKEN] Problematic text length: {len(text)}, first 500 chars: {text[:500]}")
+        # Try sending as new message, and if that fails too, send error
+        try:
+            await m.answer(text, reply_markup=kb, **MSG_KW)
+        except Exception as e2:
+            print(f"[TOKEN] /token handler: Failed to send message: {e2}")
+            # Send error message without markdown
+            await m.answer("⚠️ Error displaying token data. The token may have special characters that can't be displayed.", reply_markup=kb)
 
     elapsed_ms = int((time.time() - start_time) * 1000)
     log_command(user_id, "/token", mint, ok=True, ms=elapsed_ms)
@@ -3307,8 +3315,15 @@ async def text_input_handler(m: Message):
 
         try:
             await status.edit_text(text, reply_markup=kb, **MSG_KW)
-        except Exception:
-            await m.answer(text, reply_markup=kb, **MSG_KW)
+        except Exception as e:
+            print(f"[TOKEN] Failed to edit message: {e}")
+            # Try sending as new message, and if that fails too, escape the text
+            try:
+                await m.answer(text, reply_markup=kb, **MSG_KW)
+            except Exception as e2:
+                print(f"[TOKEN] Failed to send message: {e2}")
+                # Send error message without markdown
+                await m.answer("⚠️ Error displaying token data. The token may have special characters that can't be displayed.", reply_markup=kb)
 
         elapsed_ms = int((time.time() - start_time) * 1000)
         log_command(user_id, "/token", mint, ok=True, ms=elapsed_ms)
