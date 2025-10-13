@@ -1247,7 +1247,7 @@ async def fetch_pair_data(session: aiohttp.ClientSession,
                 "h24": overview.get("v24hUSD") or overview.get("v24h")
             },
             "pairCreatedAt":
-            overview.get("createdAt") or overview.get("firstTradeUnixTime"),
+            overview.get("createdAt") or overview.get("firstTradeAt") or overview.get("firstTradeUnixTime"),
             "chainId":
             "solana",
         }
