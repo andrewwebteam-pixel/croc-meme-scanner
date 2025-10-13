@@ -872,12 +872,23 @@ async def fetch_latest_sol_pairs(
                             tokens = data.get("items") or data.get(
                                 "tokens") or []
                             if tokens and isinstance(tokens, list):
-                                # Extract token addresses (already sorted by newest)
+                                # Extract token addresses AND creation timestamps (already sorted by newest)
+                                token_data = []
                                 for token in tokens:
                                     addr = token.get("address") or token.get(
                                         "mint")
                                     if addr:
-                                        token_addresses.append(addr)
+                                        # Try to get creation timestamp from various fields
+                                        created = (token.get("timeCreated") or 
+                                                  token.get("listingTime") or 
+                                                  token.get("createdAt") or
+                                                  token.get("listing_time") or
+                                                  token.get("created_at"))
+                                        token_data.append({
+                                            "address": addr,
+                                            "created": created
+                                        })
+                                token_addresses = token_data
                                 print(
                                     f"[SCAN] Found {len(token_addresses)} new token addresses from Birdeye"
                                 )
@@ -914,7 +925,8 @@ async def fetch_latest_sol_pairs(
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
         # Create tasks for parallel fetching
         tasks = []
-        for mint in token_addresses:
+        for token_info in token_addresses:
+            mint = token_info["address"]
             tasks.append(asyncio.gather(
                 birdeye_overview(session, mint),
                 birdeye_token_security(session, mint),
@@ -926,7 +938,10 @@ async def fetch_latest_sol_pairs(
         
         # Build pairs from results
         all_pairs = []
-        for i, mint in enumerate(token_addresses):
+        for i, token_info in enumerate(token_addresses):
+            mint = token_info["address"]
+            listing_created_at = token_info.get("created")  # Timestamp from new_listing endpoint
+            
             overview, security = results[i]
             
             # Handle exceptions
@@ -952,7 +967,13 @@ async def fetch_latest_sol_pairs(
             liquidity = overview.get("liquidity") or overview.get("v24hUSD") or 0
             fdv = overview.get("fdv") or overview.get("mc") or overview.get("marketCap") or 0
             volume = overview.get("v24hUSD") or overview.get("volume") or 0
-            created_at = overview.get("createdAt") or overview.get("listingTime") or int(time.time() * 1000)
+            
+            # Use creation timestamp from new_listing first, then overview, then current time
+            created_at = (listing_created_at or 
+                         overview.get("createdAt") or 
+                         overview.get("listingTime") or 
+                         overview.get("firstTradeAt") or
+                         int(time.time() * 1000))
             
             pair = {
                 "baseToken": {
@@ -973,7 +994,7 @@ async def fetch_latest_sol_pairs(
                 pair["security"] = security
             
             all_pairs.append(pair)
-            print(f"[SCAN] Built pair for {symbol}: liq=${liquidity}, vol=${volume}")
+            print(f"[SCAN] Built pair for {symbol}: liq=${liquidity}, vol=${volume}, age={human_age(from_unix_ms(created_at))}")
     
     print(f"[SCAN] Built {len(all_pairs)} pairs, applying filters...")
     
