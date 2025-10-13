@@ -2168,11 +2168,15 @@ async def alerts_handler(m: Message):
 
         try:
             thresholds = json.loads(row[0])
+            if not thresholds:
+                await m.answer(T("alert_list_empty"), reply_markup=kb, **MSG_KW)
+                return
+            
             alert_lines = []
             alert_buttons = []
             for mint, price in thresholds.items():
-                # Show full mint address one per line
-                alert_lines.append(f"• `{mint}` — ${price}")
+                # Show full mint address without backticks for better visibility
+                alert_lines.append(f"• {mint} — ${price}")
                 # Add button for each mint to allow copying
                 alert_buttons.append([InlineKeyboardButton(text=f"📋 Copy {mint[:8]}...", callback_data=f"copy:{mint}")])
             
@@ -3011,10 +3015,23 @@ async def alerts_menu_handler(m: Message):
             return
 
         alert_lines = []
+        alert_buttons = []
         for mint, price in thresholds.items():
-            alert_lines.append(f"• `{mint[:8]}...` — ${price}")
+            # Show full mint address without backticks for better visibility
+            alert_lines.append(f"• {mint} — ${price}")
+            # Add button for each mint to allow copying
+            alert_buttons.append([InlineKeyboardButton(text=f"📋 Copy {mint[:8]}...", callback_data=f"copy:{mint}")])
+        
+        # Add action buttons at the end
+        alert_buttons.extend([[
+            InlineKeyboardButton(text=T("btn_add_alert"), callback_data="alertmenu:add")
+        ], [
+            InlineKeyboardButton(text=T("btn_remove_alert"), callback_data="alertmenu:remove")
+        ]])
+        
+        kb_with_mints = InlineKeyboardMarkup(inline_keyboard=alert_buttons)
         await m.answer(T("alert_list_header", alerts="\n".join(alert_lines)),
-                       reply_markup=kb,
+                       reply_markup=kb_with_mints,
                        **MSG_KW)
     except Exception as e:
         print(f"[ALERTS] Parse error in alerts_menu_handler: {e}")
