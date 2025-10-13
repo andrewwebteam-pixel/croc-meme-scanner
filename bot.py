@@ -1038,7 +1038,7 @@ async def fetch_latest_sol_pairs(
             if min_top10 is not None and min_top10 > 0:
                 security = pair.get("security")
                 if security:
-                    top10_share = security.get("top10HolderPercent") or security.get("top10_holder_percent") or 0
+                    top10_share = extract_top10_holders(security) or 0
                     if top10_share < min_top10:
                         symbol = pair['baseToken']['symbol']
                         print(f"[SCAN] {symbol} filtered out: top10 {top10_share}% < min {min_top10}%")
@@ -1283,7 +1283,7 @@ def extract_lp_lock_ratio(data: Dict[str, Any]) -> Optional[float]:
 
 
 def extract_created_at(data: Dict[str, Any]) -> Optional[datetime]:
-    for k in ("createdAt", "firstTradeAt", "first_trade_at",
+    for k in ("createdAt", "created_at", "firstTradeAt", "first_trade_at",
               "first_trade_unix", "firstTradeUnixTime"):
         v = data.get(k)
         if v is None: continue
@@ -1295,6 +1295,19 @@ def extract_created_at(data: Dict[str, Any]) -> Optional[datetime]:
             except Exception:
                 continue
         return from_unix_ms(v)
+    return None
+
+
+def extract_top10_holders(data: Dict[str, Any]) -> Optional[float]:
+    """Extract top-10 holders percentage from Birdeye security data."""
+    for k in ("top10HolderPercent", "top10_holder_percent", "top_10_holder_percent",
+              "top10HoldersPercent", "topHoldersPercent", "top_holders_percentage"):
+        v = data.get(k)
+        if v is not None:
+            try:
+                return float(v)
+            except (ValueError, TypeError):
+                continue
     return None
 
 
@@ -1666,9 +1679,33 @@ def build_full_token_text(p: Dict[str, Any], extra: Optional[Dict[str, Any]],
     liq_usd = (p.get("liquidity") or {}).get("usd")
     vol24 = (p.get("volume") or {}).get("h24")
     lp_lock = extract_lp_lock_ratio(extra or {}) if extra else None
-    age_dt = extract_created_at(extra) if extra else None
-    if not age_dt:
+    
+    # Try multiple sources for age timestamp with comprehensive fallbacks
+    age_dt = None
+    
+    # First try: extract from extra (overview data)
+    if extra:
+        age_dt = extract_created_at(extra)
+    
+    # Second try: from p.pairCreatedAt
+    if not age_dt and p.get("pairCreatedAt"):
         age_dt = from_unix_ms(p.get("pairCreatedAt"))
+    
+    # Third try: check extra for additional timestamp fields directly
+    if not age_dt and extra:
+        for field in ["listingTime", "listing_time", "timeCreated", "time_created"]:
+            val = extra.get(field)
+            if val:
+                age_dt = from_unix_ms(val) if isinstance(val, (int, float)) else None
+                if age_dt:
+                    break
+    
+    # Debug logging for Age display
+    if not age_dt:
+        print(f"[DEBUG AGE] No age_dt found!")
+        print(f"[DEBUG AGE] extra keys: {list(extra.keys()) if extra else 'None'}")
+        print(f"[DEBUG AGE] p dict: {p}")
+        print(f"[DEBUG AGE] p.pairCreatedAt value: {p.get('pairCreatedAt')}, type: {type(p.get('pairCreatedAt'))}")
 
     age_hours = (datetime.now(tz=timezone.utc) -
                  age_dt).total_seconds() / 3600 if age_dt else 0
@@ -1911,9 +1948,7 @@ async def scan_handler(m: Message):
                 extra, mkts, security_info = None, None, None
 
         if security_info:
-            topk_share = security_info.get(
-                "top10HolderPercent") or security_info.get(
-                    "top10_holder_percent")
+            topk_share = extract_top10_holders(security_info)
 
     text = build_full_token_text(p, extra, mkts, security_info, topk_share,
                                  is_pro)
@@ -2000,9 +2035,7 @@ async def token_handler(m: Message):
             extra.update(security_info)
 
         if security_info:
-            topk_share = security_info.get(
-                "top10HolderPercent") or security_info.get(
-                    "top10_holder_percent")
+            topk_share = extract_top10_holders(security_info)
 
         p = {
             "baseToken": {
@@ -2385,9 +2418,7 @@ async def token_callback_handler(cb: CallbackQuery):
             }
 
             if security_info:
-                topk_share = security_info.get(
-                    "top10HolderPercent") or security_info.get(
-                        "top10_holder_percent")
+                topk_share = extract_top10_holders(security_info)
 
     try:
         if mode == "details":
@@ -2473,9 +2504,7 @@ async def scan_cb_handler(cb: CallbackQuery):
                     extra, mkts, security_info = None, None, None
 
             if security_info:
-                topk_share = security_info.get(
-                    "top10HolderPercent") or security_info.get(
-                        "top10_holder_percent")
+                topk_share = extract_top10_holders(security_info)
 
         text = build_full_token_text(p, extra, mkts, security_info, topk_share,
                                      is_pro)
@@ -2514,9 +2543,7 @@ async def scan_cb_handler(cb: CallbackQuery):
                 extra, mkts, security_info = None, None, None
 
         if security_info:
-            topk_share = security_info.get(
-                "top10HolderPercent") or security_info.get(
-                    "top10_holder_percent")
+            topk_share = extract_top10_holders(security_info)
 
     text = build_full_token_text(p, extra, mkts, security_info, topk_share,
                                  is_pro)
@@ -2854,9 +2881,7 @@ async def research_menu_callback_handler(cb: CallbackQuery):
                     extra, mkts, security_info = None, None, None
 
             if security_info:
-                topk_share = security_info.get(
-                    "top10HolderPercent") or security_info.get(
-                        "top10_holder_percent")
+                topk_share = extract_top10_holders(security_info)
 
         text = build_full_token_text(p, extra, mkts, security_info, topk_share,
                                      is_pro)
@@ -3304,9 +3329,7 @@ async def text_input_handler(m: Message):
                 session, mint) if BIRDEYE_API_KEY and mint else None
             security_info = await birdeye_token_security(
                 session, mint) if BIRDEYE_API_KEY and mint else None
-            topk_share = security_info.get(
-                "top10HolderPercent") or security_info.get(
-                    "top10_holder_percent") if security_info else None
+            topk_share = extract_top10_holders(security_info) if security_info else None
 
         is_pro = is_pro_user(user_id)
         text = build_full_token_text(p, extra, mkts, security_info, topk_share,
