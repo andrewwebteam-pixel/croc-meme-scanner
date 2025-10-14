@@ -883,7 +883,8 @@ async def fetch_latest_sol_pairs(
                                                   token.get("listingTime") or 
                                                   token.get("createdAt") or
                                                   token.get("listing_time") or
-                                                  token.get("created_at"))
+                                                  token.get("created_at") or
+                                                  token.get("liquidityAddedAt"))
                                         token_data.append({
                                             "address": addr,
                                             "created": created
@@ -987,10 +988,11 @@ async def fetch_latest_sol_pairs(
                     created_at_ts = int(age_dt.timestamp())
                     print(f"[SCAN] {mint[:8]}: Using creation_time from overview: {created_at_ts}")
             # Fallback: use raw listing timestamp if available
-            elif listing_created_at:
-                created_at_ts = int(listing_created_at) if isinstance(listing_created_at, (int, float)) else None
-                if created_at_ts:
-                    print(f"[SCAN] {mint[:8]}: Using creation_time from listing: {created_at_ts}")
+            if not created_at_ts and listing_created_at:
+                listing_dt = from_unix_ms(listing_created_at)
+                if listing_dt:
+                    created_at_ts = int(listing_dt.timestamp())
+                    print(f"[SCAN] {mint[:8]}: Using creation_time from listing (converted): {created_at_ts}")
             # Final fallback: None (will show "—" in display)
             if not created_at_ts:
                 print(f"[SCAN] {mint[:8]}: No creation timestamp available")
@@ -1345,7 +1347,7 @@ def extract_lp_lock_ratio(data: Dict[str, Any]) -> Optional[float]:
 
 def extract_created_at(data: Dict[str, Any]) -> Optional[datetime]:
     for k in ("createdAt", "created_at", "firstTradeAt", "first_trade_at",
-              "first_trade_unix", "firstTradeUnixTime", "lastTradeUnixTime"):
+              "first_trade_unix", "firstTradeUnixTime", "lastTradeUnixTime", "liquidityAddedAt"):
         v = data.get(k)
         if v is None: continue
         try:
@@ -1366,7 +1368,11 @@ def extract_top10_holders(data: Dict[str, Any]) -> Optional[float]:
         v = data.get(k)
         if v is not None:
             try:
-                return float(v)
+                pct = float(v)
+                # If value is between 0 and 1, treat it as a fraction and convert to percentage
+                if 0 <= pct <= 1:
+                    pct = pct * 100
+                return pct
             except (ValueError, TypeError):
                 continue
     return None
