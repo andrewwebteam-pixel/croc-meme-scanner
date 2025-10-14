@@ -928,51 +928,62 @@ async def fetch_latest_sol_pairs(
         print("[SCAN] No token addresses found")
         return []
 
-    # Fetch overview + security + creation time for all tokens in parallel for speed
-    print(f"[SCAN] Fetching data for {len(token_addresses)} tokens in parallel...")
+    # Fetch overview + security for all tokens with concurrency control
+    print(f"[SCAN] Fetching data for {len(token_addresses)} tokens in parallel (max 10 concurrent)...")
     
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
-        # Create tasks for parallel fetching
-        tasks = []
-        for token_info in token_addresses:
-            mint = token_info["address"]
-            tasks.append(asyncio.gather(
+    # Semaphore to limit concurrent API requests (prevent 429/403 errors)
+    sem = asyncio.Semaphore(10)
+    
+    async def fetch_with_limit(session, mint):
+        async with sem:
+            return await asyncio.gather(
                 birdeye_overview(session, mint),
                 birdeye_token_security(session, mint),
                 fetch_creation_time(mint),
                 return_exceptions=True
-            ))
+            )
+    
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+        # Create tasks for parallel fetching with concurrency limit
+        tasks = [fetch_with_limit(session, token_info["address"]) for token_info in token_addresses]
         
-        # Execute all fetches in parallel
+        # Execute all fetches in parallel with semaphore control
         results = await asyncio.gather(*tasks)
         
         # Build pairs from results
         all_pairs = []
         for i, token_info in enumerate(token_addresses):
             mint = token_info["address"]
-            listing_created_at = token_info.get("created")  # Timestamp from new_listing endpoint
+            listing_created_at = token_info.get("created")  # liquidityAddedAt from new_listing endpoint
             
-            overview, security, creation_ts = results[i]
+            result_overview, result_security, result_creation = results[i]
             
-            # Handle exceptions
-            if isinstance(overview, Exception):
-                print(f"[SCAN] Overview exception for {mint[:8]}: {overview}")
-                continue
-                
-            if isinstance(security, Exception):
-                print(f"[SCAN] Security exception for {mint[:8]}: {security} (continuing anyway)")
-                security = None  # Continue without security data
+            # Handle exceptions - ensure we have dict types, not exceptions
+            overview: Dict[str, Any] = {}
+            security: Optional[Dict[str, Any]] = None
+            creation_ts: Optional[int] = None
             
-            if isinstance(creation_ts, Exception):
-                print(f"[SCAN] Creation time exception for {mint[:8]}: {creation_ts} (continuing anyway)")
-                creation_ts = None
-            
-            # Handle missing or empty overview data gracefully
-            if not overview:
-                overview = {}  # Use empty dict instead of skipping
-                print(f"[SCAN] No overview data for {mint[:8]}, using fallback values")
-            else:
+            if isinstance(result_overview, Exception):
+                print(f"[SCAN] Overview exception for {mint[:8]}: {result_overview}")
+                # overview already set to {} above
+            elif result_overview and isinstance(result_overview, dict):
+                overview = result_overview
                 print(f"[SCAN] Got data for {mint[:8]}: symbol={overview.get('symbol')}, price={overview.get('price')}, liq={overview.get('liquidity')}")
+            else:
+                print(f"[SCAN] No overview data for {mint[:8]}, using fallback values")
+                # overview already set to {} above
+                
+            if isinstance(result_security, Exception):
+                print(f"[SCAN] Security exception for {mint[:8]}: {result_security} (continuing anyway)")
+                # security already set to None above
+            elif result_security and isinstance(result_security, dict):
+                security = result_security
+            
+            if isinstance(result_creation, Exception):
+                print(f"[SCAN] Creation time exception for {mint[:8]}: {result_creation} (continuing anyway)")
+                # creation_ts already set to None above
+            elif result_creation and isinstance(result_creation, int):
+                creation_ts = result_creation
             
             # Build pair object with all data - never skip tokens
             symbol = overview.get("symbol") or f"TOKEN_{mint[:6]}"
@@ -982,28 +993,31 @@ async def fetch_latest_sol_pairs(
             fdv = overview.get("fdv") or overview.get("mc") or overview.get("marketCap") or 0
             volume = overview.get("v24hUSD") or overview.get("volume") or 0
             
-            # Extract creation timestamp properly
+            # Extract creation timestamp with proper priority
             created_at_ts = None
             
-            # First try: use dedicated creation time endpoint
+            # Primary: use blockUnixTime/blockHumanTime from token_creation_info endpoint
             if creation_ts:
-                created_at_ts = int(creation_ts)
-                print(f"[SCAN] {mint[:8]}: Using creation_time from dedicated endpoint: {created_at_ts}")
-            # Fallback: extract from overview data using comprehensive helper
+                created_at_ts = creation_ts
+                print(f"[SCAN] {mint[:8]}: Using timestamp from token_creation_info: {created_at_ts}")
+            
+            # Fallback 1: liquidityAddedAt from new_listing
+            elif listing_created_at:
+                listing_dt = from_unix_ms(listing_created_at)
+                if listing_dt:
+                    created_at_ts = int(listing_dt.timestamp())
+                    print(f"[SCAN] {mint[:8]}: Using timestamp from liquidityAddedAt: {created_at_ts}")
+            
+            # Fallback 2: createdAt/firstTradeAt from overview data
             elif overview:
                 age_dt = extract_created_at(overview)
                 if age_dt:
                     created_at_ts = int(age_dt.timestamp())
-                    print(f"[SCAN] {mint[:8]}: Using creation_time from overview: {created_at_ts}")
-            # Fallback: use raw listing timestamp if available
-            if not created_at_ts and listing_created_at:
-                listing_dt = from_unix_ms(listing_created_at)
-                if listing_dt:
-                    created_at_ts = int(listing_dt.timestamp())
-                    print(f"[SCAN] {mint[:8]}: Using creation_time from listing (converted): {created_at_ts}")
-            # Final fallback: None (will show "—" in display)
+                    print(f"[SCAN] {mint[:8]}: Using timestamp from overview (createdAt/firstTradeAt): {created_at_ts}")
+            
+            # Final fallback: None (will show "—" in Age display)
             if not created_at_ts:
-                print(f"[SCAN] {mint[:8]}: No creation timestamp available")
+                print(f"[SCAN] {mint[:8]}: No creation timestamp available, will display '—'")
             
             # Extract Top-10 holders percentage from security data
             top10_pct = None
@@ -1294,36 +1308,61 @@ async def fetch_pair_data(session: aiohttp.ClientSession,
 
 async def fetch_creation_time(mint: str) -> Optional[int]:
     """
-    Fetch token creation timestamp from Birdeye token_creation_info endpoint,
-    with DexScreener fallback. Returns Unix timestamp (seconds) or None.
+    Fetch token creation timestamp from Birdeye token_creation_info endpoint.
+    Returns Unix timestamp (seconds) or None.
+    
+    Uses blockUnixTime (primary) or blockHumanTime (fallback) fields from API response.
     """
     url = f"{BIRDEYE_BASE}/defi/token_creation_info"
     params = {"address": mint}
-    headers = {"X-API-KEY": BIRDEYE_API_KEY, "x-chain": "solana"}
+    headers = {
+        "X-API-KEY": BIRDEYE_API_KEY,
+        "x-chain": "solana",
+        "accept": "application/json"
+    }
     
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status == 200:
-                    data = (await resp.json()).get("data")
-                    if data and data.get("created_at"):
-                        return int(data["created_at"])
+                    response_data = await resp.json()
+                    data = response_data.get("data")
+                    
+                    if not data:
+                        print(f"[BIRDEYE] token_creation_info: empty data for {mint[:8]}")
+                        return None
+                    
+                    # Primary: blockUnixTime (Unix timestamp)
+                    if data.get("blockUnixTime"):
+                        try:
+                            return int(data["blockUnixTime"])
+                        except (ValueError, TypeError) as e:
+                            print(f"[BIRDEYE] blockUnixTime parse error for {mint[:8]}: {e}")
+                    
+                    # Fallback: blockHumanTime (ISO format string)
+                    if data.get("blockHumanTime"):
+                        try:
+                            dt = datetime.fromisoformat(data["blockHumanTime"].replace("Z", "+00:00"))
+                            return int(dt.timestamp())
+                        except Exception as e:
+                            print(f"[BIRDEYE] blockHumanTime parse error for {mint[:8]}: {e}")
+                    
+                    print(f"[BIRDEYE] token_creation_info: no time fields found for {mint[:8]}")
+                    return None
+                    
+                elif resp.status == 403:
+                    print(f"[BIRDEYE] token_creation_info 403 (plan limit) for {mint[:8]}")
+                    return None
+                elif resp.status == 429:
+                    print(f"[BIRDEYE] token_creation_info 429 (rate limit) for {mint[:8]}")
+                    return None
+                else:
+                    print(f"[BIRDEYE] token_creation_info HTTP {resp.status} for {mint[:8]}")
+                    return None
+                    
     except Exception as e:
-        print(f"[BIRDEYE] token_creation_info failed for {mint[:8]}...: {e}")
-    
-    url_ds = f"https://api.dexscreener.com/latest/dex/tokens/{mint}"
-    try:
-        async with aiohttp.ClientSession() as ds:
-            async with ds.get(url_ds, timeout=aiohttp.ClientTimeout(total=10)) as r:
-                if r.status == 200:
-                    js = await r.json()
-                    ts = js.get("pairCreatedAt") or js.get("listingTime")
-                    if ts:
-                        return int(ts) // 1000
-    except Exception as e:
-        print(f"[DEXSCREENER] creation_time failed for {mint[:8]}...: {e}")
-    
-    return None
+        print(f"[BIRDEYE] token_creation_info exception for {mint[:8]}: {e}")
+        return None
 
 
 def extract_holders(data: Dict[str, Any]) -> Optional[int]:
