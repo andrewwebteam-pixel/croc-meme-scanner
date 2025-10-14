@@ -775,13 +775,21 @@ def format_usd(v: Optional[float]) -> str:
     return f"{curr}{v:.6f}"
 
 
-def from_unix_ms(ms: Optional[int | float]) -> Optional[datetime]:
+def from_unix_ms(ms: Optional[int | float | str]) -> Optional[datetime]:
     if not ms: return None
-    ts = float(ms)
-    if ts > 10_000_000_000:
-        ts = ts / 1000.0
+    
+    # Try numeric conversion first (Unix timestamp in seconds or milliseconds)
     try:
+        ts = float(ms)
+        if ts > 10_000_000_000:
+            ts = ts / 1000.0
         return datetime.fromtimestamp(ts, tz=timezone.utc)
+    except (ValueError, TypeError):
+        pass
+    
+    # If numeric conversion fails, try ISO format string parsing
+    try:
+        return datetime.fromisoformat(str(ms).replace("Z", "+00:00"))
     except Exception:
         return None
 
