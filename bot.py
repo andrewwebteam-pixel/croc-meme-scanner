@@ -2199,13 +2199,32 @@ async def token_handler(m: Message):
         if security_info and isinstance(security_info, dict):
             topk_share = extract_top10_holders(security_info)
 
-        # Determine pairCreatedAt with fallback chain
-        pair_created_at = creation_ts or (extra or {}).get("createdAt") \
-            or (extra or {}).get("firstTradeAt") \
-            or (extra or {}).get("firstTradeUnixTime") \
-            or (extra or {}).get("pairCreatedAt")
+        # Extract creation timestamp with proper priority (same as /scan logic)
+        created_at_ts = None
         
-        print(f"[TOKEN] {mint[:8]}: creation_ts={creation_ts}, extra.createdAt={(extra or {}).get('createdAt')}, final pairCreatedAt={pair_created_at}")
+        # Primary: use blockUnixTime/blockHumanTime from token_creation_info endpoint
+        if creation_ts and isinstance(creation_ts, int):
+            created_at_ts = creation_ts
+            print(f"[TOKEN] {mint[:8]}: Using timestamp from token_creation_info: {created_at_ts}")
+        
+        # Fallback 1: createdAt/firstTradeAt from overview data using extract_created_at
+        elif extra:
+            age_dt = extract_created_at(extra)
+            if age_dt:
+                created_at_ts = int(age_dt.timestamp())
+                print(f"[TOKEN] {mint[:8]}: Using timestamp from overview (createdAt/firstTradeAt): {created_at_ts}")
+        
+        # Fallback 2: pairCreatedAt from extra (try to convert)
+        if not created_at_ts and extra and extra.get("pairCreatedAt"):
+            pair_created_val = extra.get("pairCreatedAt")
+            pair_dt = from_unix_ms(pair_created_val)
+            if pair_dt:
+                created_at_ts = int(pair_dt.timestamp())
+                print(f"[TOKEN] {mint[:8]}: Using timestamp from pairCreatedAt: {created_at_ts}")
+        
+        # Final fallback: None (will show "—" in Age display)
+        if not created_at_ts:
+            print(f"[TOKEN] {mint[:8]}: No creation timestamp available, will display '—'")
         
         p = {
             "baseToken": {
@@ -2224,7 +2243,7 @@ async def token_handler(m: Message):
                 "h24": (extra or {}).get("v24hUSD")
                 or (extra or {}).get("v24h") or (extra or {}).get("volume24h")
             },
-            "pairCreatedAt": pair_created_at,
+            "pairCreatedAt": created_at_ts,
             "chainId":
             "solana",
         }
