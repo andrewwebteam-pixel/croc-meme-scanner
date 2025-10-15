@@ -795,19 +795,56 @@ def from_unix_ms(ms: Optional[int | float | str]) -> Optional[datetime]:
 
 
 def human_age(dt: Optional[datetime]) -> str:
-    if not dt: return T("fmt_dash")
-    delta = datetime.now(tz=timezone.utc) - dt
-    total_hours = int(delta.total_seconds() // 3600)
+    """
+    Calculate and format age from datetime to now.
+    Format: m/h/d/month/years (minutes/hours/days/months/years)
+    Returns "—" if dt is None or in the future.
+    """
+    if not dt:
+        return T("fmt_dash")
     
+    delta = datetime.now(tz=timezone.utc) - dt
+    total_seconds = delta.total_seconds()
+    
+    # Clamp negative deltas (future timestamps) to zero
+    if total_seconds < 0:
+        return "0m"
+    
+    total_minutes = int(total_seconds // 60)
+    total_hours = int(total_seconds // 3600)
+    total_days = int(total_seconds // 86400)
+    
+    # Less than 1 hour: show minutes
+    if total_hours < 1:
+        return f"{total_minutes}m"
+    
+    # Less than 24 hours: show hours
     if total_hours < 24:
         return f"{total_hours}{T('fmt_hours')}"
     
-    days = total_hours // 24
-    hours = total_hours % 24
+    # Less than 30 days: show days and hours
+    if total_days < 30:
+        days = total_days
+        hours = (total_hours % 24)
+        if hours > 0:
+            return f"{days}{T('fmt_days')} {hours}{T('fmt_hours')}"
+        return f"{days}{T('fmt_days')}"
     
-    if hours > 0:
-        return f"{days}{T('fmt_days')} {hours}{T('fmt_hours')}"
-    return f"{days}{T('fmt_days')}"
+    # Less than 365 days: show months and days
+    if total_days < 365:
+        months = total_days // 30
+        days = total_days % 30
+        if days > 0:
+            return f"{months}mo {days}{T('fmt_days')}"
+        return f"{months}mo"
+    
+    # 365+ days: show years and months
+    years = total_days // 365
+    remaining_days = total_days % 365
+    months = remaining_days // 30
+    if months > 0:
+        return f"{years}y {months}mo"
+    return f"{years}y"
 
 
 _mint_re = re.compile(r"[1-9A-HJ-NP-Za-km-z]{32,44}")
@@ -1312,6 +1349,7 @@ async def fetch_creation_time(mint: str) -> Optional[int]:
     Returns Unix timestamp (seconds) or None.
     
     Uses blockUnixTime (primary) or blockHumanTime (fallback) fields from API response.
+    Rejects future timestamps (> now + 5 minutes) to handle clock drift.
     """
     url = f"{BIRDEYE_BASE}/defi/token_creation_info"
     params = {"address": mint}
@@ -1320,6 +1358,10 @@ async def fetch_creation_time(mint: str) -> Optional[int]:
         "x-chain": "solana",
         "accept": "application/json"
     }
+    
+    # Allow 5-minute clock drift tolerance
+    max_future_seconds = 300
+    now_ts = int(datetime.now(tz=timezone.utc).timestamp())
     
     try:
         async with aiohttp.ClientSession() as session:
@@ -1332,10 +1374,17 @@ async def fetch_creation_time(mint: str) -> Optional[int]:
                         print(f"[BIRDEYE] token_creation_info: empty data for {mint[:8]}")
                         return None
                     
-                    # Primary: blockUnixTime (Unix timestamp)
+                    # Primary: blockUnixTime (Unix timestamp in seconds)
                     if data.get("blockUnixTime"):
                         try:
-                            return int(data["blockUnixTime"])
+                            ts = int(data["blockUnixTime"])
+                            
+                            # Reject future timestamps (clock drift protection)
+                            if ts > now_ts + max_future_seconds:
+                                print(f"[BIRDEYE] {mint[:8]} blockUnixTime {ts} is in future, rejecting (now={now_ts})")
+                            else:
+                                print(f"[BIRDEYE] {mint[:8]} blockUnixTime: {ts} -> {datetime.fromtimestamp(ts, tz=timezone.utc)}")
+                                return ts
                         except (ValueError, TypeError) as e:
                             print(f"[BIRDEYE] blockUnixTime parse error for {mint[:8]}: {e}")
                     
@@ -1343,11 +1392,18 @@ async def fetch_creation_time(mint: str) -> Optional[int]:
                     if data.get("blockHumanTime"):
                         try:
                             dt = datetime.fromisoformat(data["blockHumanTime"].replace("Z", "+00:00"))
-                            return int(dt.timestamp())
+                            ts = int(dt.timestamp())
+                            
+                            # Reject future timestamps
+                            if ts > now_ts + max_future_seconds:
+                                print(f"[BIRDEYE] {mint[:8]} blockHumanTime {ts} is in future, rejecting")
+                            else:
+                                print(f"[BIRDEYE] {mint[:8]} blockHumanTime: {data['blockHumanTime']} -> {ts}")
+                                return ts
                         except Exception as e:
                             print(f"[BIRDEYE] blockHumanTime parse error for {mint[:8]}: {e}")
                     
-                    print(f"[BIRDEYE] token_creation_info: no time fields found for {mint[:8]}")
+                    print(f"[BIRDEYE] token_creation_info: no valid time fields for {mint[:8]}")
                     return None
                     
                 elif resp.status == 403:
@@ -1699,9 +1755,11 @@ def build_details_text(p: Dict[str, Any], extra: Optional[Dict[str, Any]],
     if created_ts:
         age_dt = datetime.fromtimestamp(created_ts, tz=timezone.utc)
         age_str = human_age(age_dt)
+        print(f"[AGE] created_ts={created_ts}, age_dt={age_dt}, age_str={age_str}")
     else:
         age_dt = None
         age_str = "—"
+        print(f"[AGE] No creation timestamp found, showing dash")
 
     age_hours = (datetime.now(tz=timezone.utc) -
                  age_dt).total_seconds() / 3600 if age_dt else 0
@@ -1804,9 +1862,11 @@ def build_full_token_text(p: Dict[str, Any], extra: Optional[Dict[str, Any]],
     if created_ts:
         age_dt = datetime.fromtimestamp(created_ts, tz=timezone.utc)
         age_str = human_age(age_dt)
+        print(f"[AGE] created_ts={created_ts}, age_dt={age_dt}, age_str={age_str}")
     else:
         age_dt = None
         age_str = "—"
+        print(f"[AGE] No creation timestamp found, showing dash")
 
     age_hours = (datetime.now(tz=timezone.utc) -
                  age_dt).total_seconds() / 3600 if age_dt else 0
@@ -2139,6 +2199,14 @@ async def token_handler(m: Message):
         if security_info and isinstance(security_info, dict):
             topk_share = extract_top10_holders(security_info)
 
+        # Determine pairCreatedAt with fallback chain
+        pair_created_at = creation_ts or (extra or {}).get("createdAt") \
+            or (extra or {}).get("firstTradeAt") \
+            or (extra or {}).get("firstTradeUnixTime") \
+            or (extra or {}).get("pairCreatedAt")
+        
+        print(f"[TOKEN] {mint[:8]}: creation_ts={creation_ts}, extra.createdAt={(extra or {}).get('createdAt')}, final pairCreatedAt={pair_created_at}")
+        
         p = {
             "baseToken": {
                 "symbol": (extra or {}).get("symbol") or "",
@@ -2156,10 +2224,7 @@ async def token_handler(m: Message):
                 "h24": (extra or {}).get("v24hUSD")
                 or (extra or {}).get("v24h") or (extra or {}).get("volume24h")
             },
-            "pairCreatedAt": creation_ts or (extra or {}).get("createdAt")
-            or (extra or {}).get("firstTradeAt")
-            or (extra or {}).get("firstTradeUnixTime")
-            or (extra or {}).get("pairCreatedAt"),
+            "pairCreatedAt": pair_created_at,
             "chainId":
             "solana",
         }
