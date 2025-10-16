@@ -311,7 +311,10 @@ def T(key: str, **kwargs) -> str:
     return STR.get(key, key).format(**kwargs)
 
 
-MSG_KW: Dict[str, Any] = {"parse_mode": "Markdown", "disable_web_page_preview": True}
+MSG_KW: Dict[str, Any] = {
+    "parse_mode": "Markdown",
+    "disable_web_page_preview": True
+}
 
 SCAN_CACHE_TTL = 15
 _scan_cache: Dict[str, Any] = {"ts": 0.0, "pairs": []}
@@ -369,11 +372,14 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
                                row_width=3)
 
 
-def scan_nav_kb(sid: str, idx: int, mint: str,
-                user_id: int, max_idx: Optional[int] = None) -> InlineKeyboardMarkup:
+def scan_nav_kb(sid: str,
+                idx: int,
+                mint: str,
+                user_id: int,
+                max_idx: Optional[int] = None) -> InlineKeyboardMarkup:
     prev_idx = max(idx - 1, 0)
     next_idx = idx + 1
-    
+
     # Clamp next_idx if max_idx provided to prevent going past end
     if max_idx is not None and next_idx >= max_idx:
         next_idx = max_idx - 1
@@ -777,7 +783,7 @@ def format_usd(v: Optional[float]) -> str:
 
 def from_unix_ms(ms: Optional[int | float | str]) -> Optional[datetime]:
     if not ms: return None
-    
+
     # Try numeric conversion first (Unix timestamp in seconds or milliseconds)
     try:
         ts = float(ms)
@@ -786,7 +792,7 @@ def from_unix_ms(ms: Optional[int | float | str]) -> Optional[datetime]:
         return datetime.fromtimestamp(ts, tz=timezone.utc)
     except (ValueError, TypeError):
         pass
-    
+
     # If numeric conversion fails, try ISO format string parsing
     try:
         return datetime.fromisoformat(str(ms).replace("Z", "+00:00"))
@@ -802,26 +808,26 @@ def human_age(dt: Optional[datetime]) -> str:
     """
     if not dt:
         return T("fmt_dash")
-    
+
     delta = datetime.now(tz=timezone.utc) - dt
     total_seconds = delta.total_seconds()
-    
+
     # Clamp negative deltas (future timestamps) to zero
     if total_seconds < 0:
         return "0m"
-    
+
     total_minutes = int(total_seconds // 60)
     total_hours = int(total_seconds // 3600)
     total_days = int(total_seconds // 86400)
-    
+
     # Less than 1 hour: show minutes
     if total_hours < 1:
         return f"{total_minutes}m"
-    
+
     # Less than 24 hours: show hours
     if total_hours < 24:
         return f"{total_hours}{T('fmt_hours')}"
-    
+
     # Less than 30 days: show days and hours
     if total_days < 30:
         days = total_days
@@ -829,7 +835,7 @@ def human_age(dt: Optional[datetime]) -> str:
         if hours > 0:
             return f"{days}{T('fmt_days')} {hours}{T('fmt_hours')}"
         return f"{days}{T('fmt_days')}"
-    
+
     # Less than 365 days: show months and days
     if total_days < 365:
         months = total_days // 30
@@ -837,7 +843,7 @@ def human_age(dt: Optional[datetime]) -> str:
         if days > 0:
             return f"{months}mo {days}{T('fmt_days')}"
         return f"{months}mo"
-    
+
     # 365+ days: show years and months
     years = total_days // 365
     remaining_days = total_days % 365
@@ -924,12 +930,13 @@ async def fetch_latest_sol_pairs(
                                         "mint")
                                     if addr:
                                         # Try to get creation timestamp from various fields
-                                        created = (token.get("timeCreated") or 
-                                                  token.get("listingTime") or 
-                                                  token.get("createdAt") or
-                                                  token.get("listing_time") or
-                                                  token.get("created_at") or
-                                                  token.get("liquidityAddedAt"))
+                                        created = (
+                                            token.get("timeCreated")
+                                            or token.get("listingTime")
+                                            or token.get("createdAt")
+                                            or token.get("listing_time")
+                                            or token.get("created_at")
+                                            or token.get("liquidityAddedAt"))
                                         token_data.append({
                                             "address": addr,
                                             "created": created
@@ -966,101 +973,126 @@ async def fetch_latest_sol_pairs(
         return []
 
     # Fetch overview + security for all tokens with concurrency control
-    print(f"[SCAN] Fetching data for {len(token_addresses)} tokens in parallel (max 10 concurrent)...")
-    
+    print(
+        f"[SCAN] Fetching data for {len(token_addresses)} tokens in parallel (max 10 concurrent)..."
+    )
+
     # Semaphore to limit concurrent API requests (prevent 429/403 errors)
     sem = asyncio.Semaphore(10)
-    
+
     async def fetch_with_limit(session, mint):
         async with sem:
-            return await asyncio.gather(
-                birdeye_overview(session, mint),
-                birdeye_token_security(session, mint),
-                fetch_creation_time(mint),
-                return_exceptions=True
-            )
-    
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+            return await asyncio.gather(birdeye_overview(session, mint),
+                                        birdeye_token_security(session, mint),
+                                        fetch_creation_time(mint),
+                                        return_exceptions=True)
+
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(
+            total=15)) as session:
         # Create tasks for parallel fetching with concurrency limit
-        tasks = [fetch_with_limit(session, token_info["address"]) for token_info in token_addresses]
-        
+        tasks = [
+            fetch_with_limit(session, token_info["address"])
+            for token_info in token_addresses
+        ]
+
         # Execute all fetches in parallel with semaphore control
         results = await asyncio.gather(*tasks)
-        
+
         # Build pairs from results
         all_pairs = []
         for i, token_info in enumerate(token_addresses):
             mint = token_info["address"]
-            listing_created_at = token_info.get("created")  # liquidityAddedAt from new_listing endpoint
-            
+            listing_created_at = token_info.get(
+                "created")  # liquidityAddedAt from new_listing endpoint
+
             result_overview, result_security, result_creation = results[i]
-            
+
             # Handle exceptions - ensure we have dict types, not exceptions
             overview: Dict[str, Any] = {}
             security: Optional[Dict[str, Any]] = None
             creation_ts: Optional[int] = None
-            
+
             if isinstance(result_overview, Exception):
-                print(f"[SCAN] Overview exception for {mint[:8]}: {result_overview}")
+                print(
+                    f"[SCAN] Overview exception for {mint[:8]}: {result_overview}"
+                )
                 # overview already set to {} above
             elif result_overview and isinstance(result_overview, dict):
                 overview = result_overview
-                print(f"[SCAN] Got data for {mint[:8]}: symbol={overview.get('symbol')}, price={overview.get('price')}, liq={overview.get('liquidity')}")
+                print(
+                    f"[SCAN] Got data for {mint[:8]}: symbol={overview.get('symbol')}, price={overview.get('price')}, liq={overview.get('liquidity')}"
+                )
             else:
-                print(f"[SCAN] No overview data for {mint[:8]}, using fallback values")
+                print(
+                    f"[SCAN] No overview data for {mint[:8]}, using fallback values"
+                )
                 # overview already set to {} above
-                
+
             if isinstance(result_security, Exception):
-                print(f"[SCAN] Security exception for {mint[:8]}: {result_security} (continuing anyway)")
+                print(
+                    f"[SCAN] Security exception for {mint[:8]}: {result_security} (continuing anyway)"
+                )
                 # security already set to None above
             elif result_security and isinstance(result_security, dict):
                 security = result_security
-            
+
             if isinstance(result_creation, Exception):
-                print(f"[SCAN] Creation time exception for {mint[:8]}: {result_creation} (continuing anyway)")
+                print(
+                    f"[SCAN] Creation time exception for {mint[:8]}: {result_creation} (continuing anyway)"
+                )
                 # creation_ts already set to None above
             elif result_creation and isinstance(result_creation, int):
                 creation_ts = result_creation
-            
+
             # Build pair object with all data - never skip tokens
             symbol = overview.get("symbol") or f"TOKEN_{mint[:6]}"
             name = overview.get("name") or "Unknown Token"
             price = overview.get("price") or overview.get("priceUsd") or 0
-            liquidity = overview.get("liquidity") or overview.get("v24hUSD") or 0
-            fdv = overview.get("fdv") or overview.get("mc") or overview.get("marketCap") or 0
+            liquidity = overview.get("liquidity") or overview.get(
+                "v24hUSD") or 0
+            fdv = overview.get("fdv") or overview.get("mc") or overview.get(
+                "marketCap") or 0
             volume = overview.get("v24hUSD") or overview.get("volume") or 0
-            
+
             # Extract creation timestamp with proper priority
             created_at_ts = None
-            
+
             # Primary: use blockUnixTime/blockHumanTime from token_creation_info endpoint
             if creation_ts:
                 created_at_ts = creation_ts
-                print(f"[SCAN] {mint[:8]}: Using timestamp from token_creation_info: {created_at_ts}")
-            
+                print(
+                    f"[SCAN] {mint[:8]}: Using timestamp from token_creation_info: {created_at_ts}"
+                )
+
             # Fallback 1: liquidityAddedAt from new_listing
             elif listing_created_at:
                 listing_dt = from_unix_ms(listing_created_at)
                 if listing_dt:
                     created_at_ts = int(listing_dt.timestamp())
-                    print(f"[SCAN] {mint[:8]}: Using timestamp from liquidityAddedAt: {created_at_ts}")
-            
+                    print(
+                        f"[SCAN] {mint[:8]}: Using timestamp from liquidityAddedAt: {created_at_ts}"
+                    )
+
             # Fallback 2: createdAt/firstTradeAt from overview data
             elif overview:
                 age_dt = extract_created_at(overview)
                 if age_dt:
                     created_at_ts = int(age_dt.timestamp())
-                    print(f"[SCAN] {mint[:8]}: Using timestamp from overview (createdAt/firstTradeAt): {created_at_ts}")
-            
+                    print(
+                        f"[SCAN] {mint[:8]}: Using timestamp from overview (createdAt/firstTradeAt): {created_at_ts}"
+                    )
+
             # Final fallback: None (will show "—" in Age display)
             if not created_at_ts:
-                print(f"[SCAN] {mint[:8]}: No creation timestamp available, will display '—'")
-            
+                print(
+                    f"[SCAN] {mint[:8]}: No creation timestamp available, will display '—'"
+                )
+
             # Extract Top-10 holders percentage from security data
             top10_pct = None
             if security:
                 top10_pct = extract_top10_holders(security)
-            
+
             pair = {
                 "baseToken": {
                     "symbol": symbol,
@@ -1068,59 +1100,75 @@ async def fetch_latest_sol_pairs(
                     "address": mint
                 },
                 "priceUsd": price,
-                "liquidity": {"usd": liquidity},
+                "liquidity": {
+                    "usd": liquidity
+                },
                 "fdv": fdv,
-                "volume": {"h24": volume},
-                "pairCreatedAt": created_at_ts,  # Unix timestamp (seconds) or None
+                "volume": {
+                    "h24": volume
+                },
+                "pairCreatedAt":
+                created_at_ts,  # Unix timestamp (seconds) or None
                 "top10_pct": top10_pct,  # Explicitly set (value or None)
                 "chainId": "solana",
             }
-            
+
             # Store security data if available
             if security:
                 pair["security"] = security
-            
+
             all_pairs.append(pair)
-            age_str = human_age(datetime.fromtimestamp(created_at_ts, tz=timezone.utc)) if created_at_ts else "—"
-            print(f"[SCAN] Built pair for {symbol}: liq=${liquidity}, vol=${volume}, age={age_str}, top10={top10_pct if top10_pct else '—'}%")
-    
+            age_str = human_age(
+                datetime.fromtimestamp(
+                    created_at_ts, tz=timezone.utc)) if created_at_ts else "—"
+            print(
+                f"[SCAN] Built pair for {symbol}: liq=${liquidity}, vol=${volume}, age={age_str}, top10={top10_pct if top10_pct else '—'}%"
+            )
+
     print(f"[SCAN] Built {len(all_pairs)} pairs, applying filters...")
-    
+
     # Apply filters using the dedicated function
     if user_filters:
         filtered_pairs = []
         now = datetime.now(timezone.utc)
-        
+
         for pair in all_pairs:
             # Liquidity filter
             min_liq = user_filters.get("min_liq")
             if min_liq is not None and min_liq > 0:
                 liq = pair.get("liquidity", {}).get("usd") or 0
                 if liq < min_liq:
-                    print(f"[SCAN] {pair['baseToken']['symbol']} filtered out: liq ${liq} < min ${min_liq}")
+                    print(
+                        f"[SCAN] {pair['baseToken']['symbol']} filtered out: liq ${liq} < min ${min_liq}"
+                    )
                     continue
-            
+
             # Volume filter
             min_vol = user_filters.get("min_vol")
             if min_vol is not None and min_vol > 0:
                 vol = pair.get("volume", {}).get("h24") or 0
                 if vol < min_vol:
-                    print(f"[SCAN] {pair['baseToken']['symbol']} filtered out: vol ${vol} < min ${min_vol}")
+                    print(
+                        f"[SCAN] {pair['baseToken']['symbol']} filtered out: vol ${vol} < min ${min_vol}"
+                    )
                     continue
-            
+
             # Age filter
             max_age_h = user_filters.get("max_age_h")
             if max_age_h is not None and max_age_h > 0:
                 created = pair.get("pairCreatedAt")
                 if created:
-                    created_dt = from_unix_ms(created) if isinstance(created, (int, float)) else None
+                    created_dt = from_unix_ms(created) if isinstance(
+                        created, (int, float)) else None
                     if created_dt:
                         age_h = (now - created_dt).total_seconds() / 3600
                         if age_h > max_age_h:
                             symbol = pair['baseToken']['symbol']
-                            print(f"[SCAN] {symbol} filtered out: age {age_h:.1f}h > max {max_age_h}h")
+                            print(
+                                f"[SCAN] {symbol} filtered out: age {age_h:.1f}h > max {max_age_h}h"
+                            )
                             continue
-            
+
             # Top-10 holder share filter
             min_top10 = user_filters.get("min_top10")
             if min_top10 is not None and min_top10 > 0:
@@ -1129,12 +1177,16 @@ async def fetch_latest_sol_pairs(
                     top10_share = extract_top10_holders(security) or 0
                     if top10_share < min_top10:
                         symbol = pair['baseToken']['symbol']
-                        print(f"[SCAN] {symbol} filtered out: top10 {top10_share}% < min {min_top10}%")
+                        print(
+                            f"[SCAN] {symbol} filtered out: top10 {top10_share}% < min {min_top10}%"
+                        )
                         continue
-            
+
             filtered_pairs.append(pair)
-            print(f"[SCAN] ✅ {pair['baseToken']['symbol']} passed filters ({len(filtered_pairs)}/{limit})")
-            
+            print(
+                f"[SCAN] ✅ {pair['baseToken']['symbol']} passed filters ({len(filtered_pairs)}/{limit})"
+            )
+
             # Stop if we have enough tokens
             if len(filtered_pairs) >= limit:
                 print(f"[SCAN] Reached limit of {limit} tokens, stopping")
@@ -1142,10 +1194,11 @@ async def fetch_latest_sol_pairs(
     else:
         # No filters, just return all pairs
         filtered_pairs = all_pairs
-    
+
     # Sort by creation time (newest first), handle None values
-    filtered_pairs.sort(key=lambda x: x.get("pairCreatedAt") or 0, reverse=True)
-    
+    filtered_pairs.sort(key=lambda x: x.get("pairCreatedAt") or 0,
+                        reverse=True)
+
     print(f"[SCAN] Returning {len(filtered_pairs[:limit])} filtered tokens")
     return filtered_pairs[:limit]
 
@@ -1335,7 +1388,8 @@ async def fetch_pair_data(session: aiohttp.ClientSession,
                 "h24": overview.get("v24hUSD") or overview.get("v24h")
             },
             "pairCreatedAt":
-            overview.get("createdAt") or overview.get("firstTradeAt") or overview.get("firstTradeUnixTime"),
+            overview.get("createdAt") or overview.get("firstTradeAt")
+            or overview.get("firstTradeUnixTime"),
             "chainId":
             "solana",
         }
@@ -1347,7 +1401,7 @@ async def fetch_creation_time(mint: str) -> Optional[int]:
     """
     Fetch token creation timestamp from Birdeye token_creation_info endpoint.
     Returns Unix timestamp (seconds) or None.
-    
+
     Uses blockUnixTime (primary) or blockHumanTime (fallback) fields from API response.
     Rejects future timestamps (> now + 5 minutes) to handle clock drift.
     """
@@ -1358,64 +1412,91 @@ async def fetch_creation_time(mint: str) -> Optional[int]:
         "x-chain": "solana",
         "accept": "application/json"
     }
-    
+
     # Allow 5-minute clock drift tolerance
     max_future_seconds = 300
     now_ts = int(datetime.now(tz=timezone.utc).timestamp())
-    
+
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            async with session.get(
+                    url,
+                    params=params,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status == 200:
                     response_data = await resp.json()
                     data = response_data.get("data")
-                    
+
                     if not data:
-                        print(f"[BIRDEYE] token_creation_info: empty data for {mint[:8]}")
+                        print(
+                            f"[BIRDEYE] token_creation_info: empty data for {mint[:8]}"
+                        )
                         return None
-                    
+
                     # Primary: blockUnixTime (Unix timestamp in seconds)
                     if data.get("blockUnixTime"):
                         try:
                             ts = int(data["blockUnixTime"])
-                            
+
                             # Reject future timestamps (clock drift protection)
                             if ts > now_ts + max_future_seconds:
-                                print(f"[BIRDEYE] {mint[:8]} blockUnixTime {ts} is in future, rejecting (now={now_ts})")
+                                print(
+                                    f"[BIRDEYE] {mint[:8]} blockUnixTime {ts} is in future, rejecting (now={now_ts})"
+                                )
                             else:
-                                print(f"[BIRDEYE] {mint[:8]} blockUnixTime: {ts} -> {datetime.fromtimestamp(ts, tz=timezone.utc)}")
+                                print(
+                                    f"[BIRDEYE] {mint[:8]} blockUnixTime: {ts} -> {datetime.fromtimestamp(ts, tz=timezone.utc)}"
+                                )
                                 return ts
                         except (ValueError, TypeError) as e:
-                            print(f"[BIRDEYE] blockUnixTime parse error for {mint[:8]}: {e}")
-                    
+                            print(
+                                f"[BIRDEYE] blockUnixTime parse error for {mint[:8]}: {e}"
+                            )
+
                     # Fallback: blockHumanTime (ISO format string)
                     if data.get("blockHumanTime"):
                         try:
-                            dt = datetime.fromisoformat(data["blockHumanTime"].replace("Z", "+00:00"))
+                            dt = datetime.fromisoformat(
+                                data["blockHumanTime"].replace("Z", "+00:00"))
                             ts = int(dt.timestamp())
-                            
+
                             # Reject future timestamps
                             if ts > now_ts + max_future_seconds:
-                                print(f"[BIRDEYE] {mint[:8]} blockHumanTime {ts} is in future, rejecting")
+                                print(
+                                    f"[BIRDEYE] {mint[:8]} blockHumanTime {ts} is in future, rejecting"
+                                )
                             else:
-                                print(f"[BIRDEYE] {mint[:8]} blockHumanTime: {data['blockHumanTime']} -> {ts}")
+                                print(
+                                    f"[BIRDEYE] {mint[:8]} blockHumanTime: {data['blockHumanTime']} -> {ts}"
+                                )
                                 return ts
                         except Exception as e:
-                            print(f"[BIRDEYE] blockHumanTime parse error for {mint[:8]}: {e}")
-                    
-                    print(f"[BIRDEYE] token_creation_info: no valid time fields for {mint[:8]}")
+                            print(
+                                f"[BIRDEYE] blockHumanTime parse error for {mint[:8]}: {e}"
+                            )
+
+                    print(
+                        f"[BIRDEYE] token_creation_info: no valid time fields for {mint[:8]}"
+                    )
                     return None
-                    
+
                 elif resp.status == 403:
-                    print(f"[BIRDEYE] token_creation_info 403 (plan limit) for {mint[:8]}")
+                    print(
+                        f"[BIRDEYE] token_creation_info 403 (plan limit) for {mint[:8]}"
+                    )
                     return None
                 elif resp.status == 429:
-                    print(f"[BIRDEYE] token_creation_info 429 (rate limit) for {mint[:8]}")
+                    print(
+                        f"[BIRDEYE] token_creation_info 429 (rate limit) for {mint[:8]}"
+                    )
                     return None
                 else:
-                    print(f"[BIRDEYE] token_creation_info HTTP {resp.status} for {mint[:8]}")
+                    print(
+                        f"[BIRDEYE] token_creation_info HTTP {resp.status} for {mint[:8]}"
+                    )
                     return None
-                    
+
     except Exception as e:
         print(f"[BIRDEYE] token_creation_info exception for {mint[:8]}: {e}")
         return None
@@ -1450,7 +1531,8 @@ def extract_lp_lock_ratio(data: Dict[str, Any]) -> Optional[float]:
 
 def extract_created_at(data: Dict[str, Any]) -> Optional[datetime]:
     for k in ("createdAt", "created_at", "firstTradeAt", "first_trade_at",
-              "first_trade_unix", "firstTradeUnixTime", "lastTradeUnixTime", "liquidityAddedAt"):
+              "first_trade_unix", "firstTradeUnixTime", "lastTradeUnixTime",
+              "liquidityAddedAt"):
         v = data.get(k)
         if v is None: continue
         try:
@@ -1466,8 +1548,9 @@ def extract_created_at(data: Dict[str, Any]) -> Optional[datetime]:
 
 def extract_top10_holders(data: Dict[str, Any]) -> Optional[float]:
     """Extract top-10 holders percentage from Birdeye security data."""
-    for k in ("top10HolderPercent", "top10_holder_percent", "top_10_holder_percent",
-              "top10HoldersPercent", "topHoldersPercent", "top_holders_percentage"):
+    for k in ("top10HolderPercent", "top10_holder_percent",
+              "top_10_holder_percent", "top10HoldersPercent",
+              "topHoldersPercent", "top_holders_percentage"):
         v = data.get(k)
         if v is not None:
             try:
@@ -1749,13 +1832,15 @@ def build_details_text(p: Dict[str, Any], extra: Optional[Dict[str, Any]],
     liq_usd = (p.get("liquidity") or {}).get("usd")
     vol24 = (p.get("volume") or {}).get("h24")
     lp_lock = extract_lp_lock_ratio(extra or {}) if extra else None
-    
+
     # Extract age from pair["pairCreatedAt"] with explicit datetime conversion
     created_ts = p.get("pairCreatedAt")
     if created_ts:
         age_dt = datetime.fromtimestamp(created_ts, tz=timezone.utc)
         age_str = human_age(age_dt)
-        print(f"[AGE] created_ts={created_ts}, age_dt={age_dt}, age_str={age_str}")
+        print(
+            f"[AGE] created_ts={created_ts}, age_dt={age_dt}, age_str={age_str}"
+        )
     else:
         age_dt = None
         age_str = "—"
@@ -1856,13 +1941,15 @@ def build_full_token_text(p: Dict[str, Any], extra: Optional[Dict[str, Any]],
     liq_usd = (p.get("liquidity") or {}).get("usd")
     vol24 = (p.get("volume") or {}).get("h24")
     lp_lock = extract_lp_lock_ratio(extra or {}) if extra else None
-    
+
     # Extract age from pair["pairCreatedAt"] with explicit datetime conversion
     created_ts = p.get("pairCreatedAt")
     if created_ts:
         age_dt = datetime.fromtimestamp(created_ts, tz=timezone.utc)
         age_str = human_age(age_dt)
-        print(f"[AGE] created_ts={created_ts}, age_dt={age_dt}, age_str={age_str}")
+        print(
+            f"[AGE] created_ts={created_ts}, age_dt={age_dt}, age_str={age_str}"
+        )
     else:
         age_dt = None
         age_str = "—"
@@ -2090,14 +2177,15 @@ async def scan_handler(m: Message):
 
     p = pairs[0]
     mint = (p.get("baseToken") or {}).get("address", "")
-    
+
     # Use already-fetched top10_pct from pair dict (populated by fetch_latest_sol_pairs)
     topk_share = p.get("top10_pct")
 
     async with aiohttp.ClientSession() as session:
         extra = None
         mkts = None
-        security_info = p.get("security")  # Use already-fetched security if available
+        security_info = p.get(
+            "security")  # Use already-fetched security if available
 
         if BIRDEYE_API_KEY and mint:
             try:
@@ -2187,13 +2275,14 @@ async def token_handler(m: Message):
                                                 BaseException) else None
             birdeye_price_val = results[3] if not isinstance(
                 results[3], BaseException) else None
-            creation_ts = results[4] if not isinstance(
-                results[4], BaseException) else None
+            creation_ts = results[4] if not isinstance(results[4],
+                                                       BaseException) else None
 
         if not extra:
             print(f"[TOKEN] Birdeye failed for {mint[:8]}...")
 
-        if security_info and extra and isinstance(security_info, dict) and isinstance(extra, dict):
+        if security_info and extra and isinstance(
+                security_info, dict) and isinstance(extra, dict):
             extra.update(security_info)
 
         if security_info and isinstance(security_info, dict):
@@ -2201,31 +2290,39 @@ async def token_handler(m: Message):
 
         # Extract creation timestamp with proper priority (same as /scan logic)
         created_at_ts = None
-        
+
         # Primary: use blockUnixTime/blockHumanTime from token_creation_info endpoint
         if creation_ts and isinstance(creation_ts, int):
             created_at_ts = creation_ts
-            print(f"[TOKEN] {mint[:8]}: Using timestamp from token_creation_info: {created_at_ts}")
-        
+            print(
+                f"[TOKEN] {mint[:8]}: Using timestamp from token_creation_info: {created_at_ts}"
+            )
+
         # Fallback 1: createdAt/firstTradeAt from overview data using extract_created_at
         elif extra:
             age_dt = extract_created_at(extra)
             if age_dt:
                 created_at_ts = int(age_dt.timestamp())
-                print(f"[TOKEN] {mint[:8]}: Using timestamp from overview (createdAt/firstTradeAt): {created_at_ts}")
-        
+                print(
+                    f"[TOKEN] {mint[:8]}: Using timestamp from overview (createdAt/firstTradeAt): {created_at_ts}"
+                )
+
         # Fallback 2: pairCreatedAt from extra (try to convert)
         if not created_at_ts and extra and extra.get("pairCreatedAt"):
             pair_created_val = extra.get("pairCreatedAt")
             pair_dt = from_unix_ms(pair_created_val)
             if pair_dt:
                 created_at_ts = int(pair_dt.timestamp())
-                print(f"[TOKEN] {mint[:8]}: Using timestamp from pairCreatedAt: {created_at_ts}")
-        
+                print(
+                    f"[TOKEN] {mint[:8]}: Using timestamp from pairCreatedAt: {created_at_ts}"
+                )
+
         # Final fallback: None (will show "—" in Age display)
         if not created_at_ts:
-            print(f"[TOKEN] {mint[:8]}: No creation timestamp available, will display '—'")
-        
+            print(
+                f"[TOKEN] {mint[:8]}: No creation timestamp available, will display '—'"
+            )
+
         p = {
             "baseToken": {
                 "symbol": (extra or {}).get("symbol") or "",
@@ -2243,7 +2340,8 @@ async def token_handler(m: Message):
                 "h24": (extra or {}).get("v24hUSD")
                 or (extra or {}).get("v24h") or (extra or {}).get("volume24h")
             },
-            "pairCreatedAt": created_at_ts,
+            "pairCreatedAt":
+            created_at_ts,
             "chainId":
             "solana",
         }
@@ -2277,14 +2375,18 @@ async def token_handler(m: Message):
         await status.edit_text(text, reply_markup=kb, **MSG_KW)
     except Exception as e:
         print(f"[TOKEN] /token handler: Failed to edit message: {e}")
-        print(f"[TOKEN] Problematic text length: {len(text)}, first 500 chars: {text[:500]}")
+        print(
+            f"[TOKEN] Problematic text length: {len(text)}, first 500 chars: {text[:500]}"
+        )
         # Try sending as new message, and if that fails too, send error
         try:
             await m.answer(text, reply_markup=kb, **MSG_KW)
         except Exception as e2:
             print(f"[TOKEN] /token handler: Failed to send message: {e2}")
             # Send error message without markdown
-            await m.answer("⚠️ Error displaying token data. The token may have special characters that can't be displayed.", reply_markup=kb)
+            await m.answer(
+                "⚠️ Error displaying token data. The token may have special characters that can't be displayed.",
+                reply_markup=kb)
 
     elapsed_ms = int((time.time() - start_time) * 1000)
     log_command(user_id, "/token", mint, ok=True, ms=elapsed_ms)
@@ -2417,24 +2519,33 @@ async def alerts_handler(m: Message):
         try:
             thresholds = json.loads(row[0])
             if not thresholds:
-                await m.answer(T("alert_list_empty"), reply_markup=kb, **MSG_KW)
+                await m.answer(T("alert_list_empty"),
+                               reply_markup=kb,
+                               **MSG_KW)
                 return
-            
+
             alert_lines = []
             alert_buttons = []
             for mint, price in thresholds.items():
                 # Show full mint address without backticks for better visibility
                 alert_lines.append(f"• {mint} — ${price}")
                 # Add button for each mint to allow copying
-                alert_buttons.append([InlineKeyboardButton(text=f"📋 Copy {mint[:8]}...", callback_data=f"copy:{mint}")])
-            
+                alert_buttons.append([
+                    InlineKeyboardButton(text=f"📋 Copy {mint[:8]}...",
+                                         callback_data=f"copy:{mint}")
+                ])
+
             # Add action buttons at the end
             alert_buttons.extend([[
-                InlineKeyboardButton(text=T("btn_add_alert"), callback_data="alertmenu:add")
-            ], [
-                InlineKeyboardButton(text=T("btn_remove_alert"), callback_data="alertmenu:remove")
-            ]])
-            
+                InlineKeyboardButton(text=T("btn_add_alert"),
+                                     callback_data="alertmenu:add")
+            ],
+                                  [
+                                      InlineKeyboardButton(
+                                          text=T("btn_remove_alert"),
+                                          callback_data="alertmenu:remove")
+                                  ]])
+
             kb_with_mints = InlineKeyboardMarkup(inline_keyboard=alert_buttons)
             await m.answer(T("alert_list_header",
                              alerts="\n".join(alert_lines)),
@@ -2673,7 +2784,7 @@ async def scan_cb_handler(cb: CallbackQuery):
         # Keep session alive, just show message
         p = pairs[idx]
         mint = (p.get("baseToken") or {}).get("address", "")
-        
+
         # Use already-fetched data from pair dict
         topk_share = p.get("top10_pct")
         security_info = p.get("security")
@@ -2711,7 +2822,7 @@ async def scan_cb_handler(cb: CallbackQuery):
 
     p = pairs[idx]
     mint = (p.get("baseToken") or {}).get("address", "")
-    
+
     # Use already-fetched data from pair dict
     topk_share = p.get("top10_pct")
     security_info = p.get("security")
@@ -3048,7 +3159,7 @@ async def research_menu_callback_handler(cb: CallbackQuery):
 
         p = pairs[0]
         mint = (p.get("baseToken") or {}).get("address", "")
-        
+
         # Use already-fetched data from pair dict
         topk_share = p.get("top10_pct")
         security_info = p.get("security")
@@ -3259,15 +3370,22 @@ async def alerts_menu_handler(m: Message):
             # Show full mint address without backticks for better visibility
             alert_lines.append(f"• {mint} — ${price}")
             # Add button for each mint to allow copying
-            alert_buttons.append([InlineKeyboardButton(text=f"📋 Copy {mint[:8]}...", callback_data=f"copy:{mint}")])
-        
+            alert_buttons.append([
+                InlineKeyboardButton(text=f"📋 Copy {mint[:8]}...",
+                                     callback_data=f"copy:{mint}")
+            ])
+
         # Add action buttons at the end
         alert_buttons.extend([[
-            InlineKeyboardButton(text=T("btn_add_alert"), callback_data="alertmenu:add")
-        ], [
-            InlineKeyboardButton(text=T("btn_remove_alert"), callback_data="alertmenu:remove")
-        ]])
-        
+            InlineKeyboardButton(text=T("btn_add_alert"),
+                                 callback_data="alertmenu:add")
+        ],
+                              [
+                                  InlineKeyboardButton(
+                                      text=T("btn_remove_alert"),
+                                      callback_data="alertmenu:remove")
+                              ]])
+
         kb_with_mints = InlineKeyboardMarkup(inline_keyboard=alert_buttons)
         await m.answer(T("alert_list_header", alerts="\n".join(alert_lines)),
                        reply_markup=kb_with_mints,
@@ -3282,11 +3400,12 @@ async def copy_mint_callback_handler(cb: CallbackQuery):
     """Handle copy mint address callbacks"""
     if not cb.from_user or not cb.data or not cb.message:
         return
-    
+
     mint = cb.data.replace("copy:", "")
     # Send the mint address as a message so user can copy it
     await cb.message.answer(f"`{mint}`", parse_mode=ParseMode.MARKDOWN)
     await cb.answer("✅ Address sent!")
+
 
 @dp.callback_query(F.data.startswith("alertmenu:"))
 async def alertmenu_callback_handler(cb: CallbackQuery):
@@ -3365,7 +3484,7 @@ async def text_input_handler(m: Message):
 
             mint = state.get("mint")
             _awaiting_alert_set.pop(user_id, None)
-            
+
             if not mint:
                 await m.answer(T("cant_detect_mint"), **MSG_KW)
                 return
@@ -3518,7 +3637,8 @@ async def text_input_handler(m: Message):
                 session, mint) if BIRDEYE_API_KEY and mint else None
             security_info = await birdeye_token_security(
                 session, mint) if BIRDEYE_API_KEY and mint else None
-            topk_share = extract_top10_holders(security_info) if security_info else None
+            topk_share = extract_top10_holders(
+                security_info) if security_info else None
 
         is_pro = is_pro_user(user_id)
         text = build_full_token_text(p, extra, mkts, security_info, topk_share,
@@ -3535,7 +3655,9 @@ async def text_input_handler(m: Message):
             except Exception as e2:
                 print(f"[TOKEN] Failed to send message: {e2}")
                 # Send error message without markdown
-                await m.answer("⚠️ Error displaying token data. The token may have special characters that can't be displayed.", reply_markup=kb)
+                await m.answer(
+                    "⚠️ Error displaying token data. The token may have special characters that can't be displayed.",
+                    reply_markup=kb)
 
         elapsed_ms = int((time.time() - start_time) * 1000)
         log_command(user_id, "/token", mint, ok=True, ms=elapsed_ms)
