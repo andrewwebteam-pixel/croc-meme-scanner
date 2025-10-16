@@ -23,6 +23,8 @@ DB_PATH = os.getenv("DB_PATH", "./keys.db")
 PRODUCT = os.getenv("PRODUCT", "meme_scanner")
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "").strip()
+HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "").strip()
+HELIUS_RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}" if HELIUS_API_KEY else ""
 
 SCAN_COOLDOWN_SEC = int(os.getenv("SCAN_COOLDOWN_SEC", "30"))
 SCAN_COOLDOWN_PRO_SEC = int(os.getenv("SCAN_COOLDOWN_PRO_SEC", "10"))
@@ -1502,6 +1504,55 @@ async def fetch_creation_time(mint: str) -> Optional[int]:
         return None
 
 
+async def get_creation_time_helius(mint: str) -> Optional[int]:
+    """
+    Fetch token creation timestamp from Helius RPC using getSignaturesForAddress.
+    Returns Unix timestamp (seconds) from the oldest signature's blockTime or None.
+    This is the PRIMARY source for /token command age display.
+    """
+    if not HELIUS_RPC_URL:
+        print(f"[HELIUS] No RPC URL configured, skipping")
+        return None
+    
+    rpc_url = HELIUS_RPC_URL
+    body = {
+        "jsonrpc": "2.0",
+        "id": "helius-creation-time",
+        "method": "getSignaturesForAddress",
+        "params": [mint, {"limit": 20, "commitment": "confirmed"}]
+    }
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(rpc_url, json=body, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    response_data = await resp.json()
+                    signatures = response_data.get("result", [])
+                    
+                    if not signatures:
+                        print(f"[HELIUS] No signatures found for {mint[:8]}")
+                        return None
+                    
+                    # Get oldest signature (last element in array, newest→oldest order)
+                    oldest_sig = signatures[-1]
+                    block_time = oldest_sig.get("blockTime")
+                    
+                    if block_time and isinstance(block_time, (int, float)):
+                        ts = int(block_time)
+                        print(f"[HELIUS] {mint[:8]} creation time from oldest signature: {ts} -> {datetime.fromtimestamp(ts, tz=timezone.utc)}")
+                        return ts
+                    else:
+                        print(f"[HELIUS] {mint[:8]} oldest signature has no blockTime")
+                        return None
+                else:
+                    print(f"[HELIUS] HTTP {resp.status} for {mint[:8]}")
+                    return None
+                    
+    except Exception as e:
+        print(f"[HELIUS] Error fetching creation time for {mint[:8]}: {e}")
+        return None
+
+
 def extract_holders(data: Dict[str, Any]) -> Optional[int]:
     for k in ("holders", "holder", "holder_count", "holdersCount",
               "uniqueHolders"):
@@ -2260,12 +2311,14 @@ async def token_handler(m: Message):
 
         creation_ts = None
         if BIRDEYE_API_KEY:
+            # Use Helius RPC as PRIMARY source for creation time (faster, more reliable than Birdeye)
+            # Birdeye provides price, liquidity, security; RPC provides accurate blockchain timestamp
             results = await asyncio.gather(birdeye_overview(session, mint),
                                            birdeye_token_security(
                                                session, mint),
                                            birdeye_markets(session, mint),
                                            birdeye_price(session, mint),
-                                           fetch_creation_time(mint),
+                                           get_creation_time_helius(mint),
                                            return_exceptions=True)
             extra = results[0] if not isinstance(results[0],
                                                  BaseException) else None
@@ -2288,40 +2341,13 @@ async def token_handler(m: Message):
         if security_info and isinstance(security_info, dict):
             topk_share = extract_top10_holders(security_info)
 
-        # Extract creation timestamp with proper priority (same as /scan logic)
+        # Use Helius RPC timestamp directly (PRIMARY and ONLY source)
         created_at_ts = None
-
-        # Primary: use blockUnixTime/blockHumanTime from token_creation_info endpoint
         if creation_ts and isinstance(creation_ts, int):
             created_at_ts = creation_ts
-            print(
-                f"[TOKEN] {mint[:8]}: Using timestamp from token_creation_info: {created_at_ts}"
-            )
-
-        # Fallback 1: createdAt/firstTradeAt from overview data using extract_created_at
-        elif extra:
-            age_dt = extract_created_at(extra)
-            if age_dt:
-                created_at_ts = int(age_dt.timestamp())
-                print(
-                    f"[TOKEN] {mint[:8]}: Using timestamp from overview (createdAt/firstTradeAt): {created_at_ts}"
-                )
-
-        # Fallback 2: pairCreatedAt from extra (try to convert)
-        if not created_at_ts and extra and extra.get("pairCreatedAt"):
-            pair_created_val = extra.get("pairCreatedAt")
-            pair_dt = from_unix_ms(pair_created_val)
-            if pair_dt:
-                created_at_ts = int(pair_dt.timestamp())
-                print(
-                    f"[TOKEN] {mint[:8]}: Using timestamp from pairCreatedAt: {created_at_ts}"
-                )
-
-        # Final fallback: None (will show "—" in Age display)
-        if not created_at_ts:
-            print(
-                f"[TOKEN] {mint[:8]}: No creation timestamp available, will display '—'"
-            )
+            print(f"[TOKEN] {mint[:8]}: Using timestamp from Helius RPC: {created_at_ts}")
+        else:
+            print(f"[TOKEN] {mint[:8]}: No creation timestamp from RPC, will display '—'")
 
         p = {
             "baseToken": {
