@@ -56,7 +56,7 @@ STR = {
      "Set price alerts for your tokens.\n\n"
      "💡 *Quick Commands:*\n"
      "/token <mint> — token details\n"
-     "/my — your subscription tier\n"
+     "/my — your access status\n"
      "/logout — remove your key"),
     "logged_out":
     "✅ Your key has been removed. Goodbye!",
@@ -153,11 +153,11 @@ STR = {
     "card_holders":
     "Holders: {holders}",
     "card_holders_hidden":
-    "Holders: Hidden on Free plan",
+    "Holders: —",
     "card_lp_locked":
     "LP Locked: {lp}%",
     "card_lp_locked_hidden":
-    "LP Locked: Hidden on Free plan",
+    "LP Locked: —",
     "card_risk":
     "⚠️ Risk: {risks}",
     "risk_low_liquidity":
@@ -181,7 +181,7 @@ STR = {
     "exchanges_item":
     "- {dex}: {liq} liquidity",
     "exchanges_hidden":
-    "Exchanges: Hidden on Free plan",
+    "Exchanges: —",
     "birdeye_header":
     "Birdeye:",
     "birdeye_empty":
@@ -195,9 +195,9 @@ STR = {
     "details_top10":
     "Top-10 holders: {pct}",
     "details_top10_hidden":
-    "Top-10 holders: Hidden on Free plan",
+    "Top-10 holders: —",
     "details_plan_hint":
-    "_Upgrade to PRO for full data access_",
+    "",
     "authority_revoked":
     "revoked",
     "authority_active":
@@ -231,7 +231,7 @@ STR = {
     "alerts_soon":
     "🔔 Alerts are coming soon. Stay tuned!",
     "my_status_valid":
-    "✅ {msg}\nTier: {tier}",
+    "✅ {msg}\nAccess: Full access",
     "my_status_invalid":
     "⛔ {msg}",
     "alert_set_usage":
@@ -604,15 +604,12 @@ def is_key_valid_for_product(access_key: str) -> tuple[bool, str]:
 
 
 def is_pro_user(user_id: int) -> bool:
-    """Check if user has PRO tier access"""
+    """Check if user has valid access (all valid keys get full access, no tiers)"""
     key = get_user_key(user_id)
     if not key:
         return False
-    info = key_info(key)
-    if not info:
-        return False
-    tier = info[3] if len(info) > 3 else "free"
-    return tier == "pro"
+    # All users with valid keys get full access (tier system removed)
+    return True
 
 
 def add_favorite(user_id: int, mint: str):
@@ -1566,8 +1563,7 @@ def extract_top10_holders(data: Dict[str, Any]) -> Optional[float]:
 
 def exchanges_block(markets: Optional[List[Dict[str, Any]]],
                     is_pro: bool = False) -> str:
-    if not is_pro:
-        return T("exchanges_hidden")
+    # All users now have full access - no tier restrictions
     if not markets:
         return T("exchanges_empty")
     cleaned = []
@@ -1663,18 +1659,15 @@ def token_card(p: Dict[str, Any],
         T("card_age", age=age_txt),
     ]
 
-    if is_pro:
-        if holders is not None:
-            lines.append(T("card_holders", holders=f"{holders:,}"))
-        else:
-            lines.append(T("card_holders", holders=T("fmt_dash")))
-        if lp_lock is not None:
-            lines.append(T("card_lp_locked", lp=f"{lp_lock:.1f}"))
-        else:
-            lines.append(T("card_lp_locked", lp=T("fmt_dash")))
+    # All users now have full access - no tier restrictions
+    if holders is not None:
+        lines.append(T("card_holders", holders=f"{holders:,}"))
     else:
-        lines.append(T("card_holders_hidden"))
-        lines.append(T("card_lp_locked_hidden"))
+        lines.append(T("card_holders", holders=T("fmt_dash")))
+    if lp_lock is not None:
+        lines.append(T("card_lp_locked", lp=f"{lp_lock:.1f}"))
+    else:
+        lines.append(T("card_lp_locked", lp=T("fmt_dash")))
 
     if risk_list:
         lines.append(T("card_risk", risks=", ".join(risk_list)))
@@ -1723,18 +1716,15 @@ def build_summary_text(p: Dict[str, Any],
         T("card_age", age=age_txt),
     ]
 
-    if is_pro:
-        if holders is not None:
-            lines.append(T("card_holders", holders=f"{holders:,}"))
-        else:
-            lines.append(T("card_holders", holders=T("fmt_dash")))
-        if lp_lock is not None:
-            lines.append(T("card_lp_locked", lp=f"{lp_lock:.1f}"))
-        else:
-            lines.append(T("card_lp_locked", lp=T("fmt_dash")))
+    # All users now have full access - no tier restrictions
+    if holders is not None:
+        lines.append(T("card_holders", holders=f"{holders:,}"))
     else:
-        lines.append(T("card_holders_hidden"))
-        lines.append(T("card_lp_locked_hidden"))
+        lines.append(T("card_holders", holders=T("fmt_dash")))
+    if lp_lock is not None:
+        lines.append(T("card_lp_locked", lp=f"{lp_lock:.1f}"))
+    else:
+        lines.append(T("card_lp_locked", lp=T("fmt_dash")))
 
     if risk_score < 100:
         lines.append(T("card_risk_score", score=risk_score))
@@ -1821,13 +1811,10 @@ def build_details_text(p: Dict[str, Any], extra: Optional[Dict[str, Any]],
         add_lines.append(T("details_mint_auth", auth=T("fmt_dash")))
         add_lines.append(T("details_freeze_auth", auth=T("fmt_dash")))
 
-    # Always show Top-10 holders line for PRO users (with value or "—")
-    if is_pro:
-        pct = topk_share
-        pct_str = f"{pct:.2f}%" if pct is not None else "—"
-        add_lines.append(T("details_top10", pct=pct_str))
-    else:
-        add_lines.append(T("details_top10_hidden"))
+    # All users now have full access - always show Top-10 holders (with value or "—")
+    pct = topk_share
+    pct_str = f"{pct:.2f}%" if pct is not None else "—"
+    add_lines.append(T("details_top10", pct=pct_str))
 
     liq_usd = (p.get("liquidity") or {}).get("usd")
     vol24 = (p.get("volume") or {}).get("h24")
@@ -1852,7 +1839,7 @@ def build_details_text(p: Dict[str, Any], extra: Optional[Dict[str, Any]],
                                                age_hours, mint_active,
                                                freeze_active, topk_share)
 
-    plan_hint = "" if is_pro else T("details_plan_hint")
+    plan_hint = ""  # All users now have full access - no upgrade hint needed
 
     be_block = birdeye_kv_block(extra)
 
@@ -1879,18 +1866,15 @@ def build_details_text(p: Dict[str, Any], extra: Optional[Dict[str, Any]],
     if age_dt is not None:
         core_lines.append(T("card_age", age=age_str))
 
-    if is_pro:
-        if holders is not None:
-            core_lines.append(T("card_holders", holders=f"{holders:,}"))
-        else:
-            core_lines.append(T("card_holders", holders=T("fmt_dash")))
-        if lp_lock is not None:
-            core_lines.append(T("card_lp_locked", lp=f"{lp_lock:.1f}"))
-        else:
-            core_lines.append(T("card_lp_locked", lp=T("fmt_dash")))
+    # All users now have full access - no tier restrictions
+    if holders is not None:
+        core_lines.append(T("card_holders", holders=f"{holders:,}"))
     else:
-        core_lines.append(T("card_holders_hidden"))
-        core_lines.append(T("card_lp_locked_hidden"))
+        core_lines.append(T("card_holders", holders=T("fmt_dash")))
+    if lp_lock is not None:
+        core_lines.append(T("card_lp_locked", lp=f"{lp_lock:.1f}"))
+    else:
+        core_lines.append(T("card_lp_locked", lp=T("fmt_dash")))
 
     if risk_score < 100:
         core_lines.append(T("card_risk_score", score=risk_score))
@@ -1933,13 +1917,10 @@ def build_full_token_text(p: Dict[str, Any], extra: Optional[Dict[str, Any]],
         add_lines.append(T("details_mint_auth", auth=T("fmt_dash")))
         add_lines.append(T("details_freeze_auth", auth=T("fmt_dash")))
 
-    # Always show Top-10 holders line for PRO users (with value or "—")
-    if is_pro:
-        pct = topk_share
-        pct_str = f"{pct:.2f}%" if pct is not None else "—"
-        add_lines.append(T("details_top10", pct=pct_str))
-    else:
-        add_lines.append(T("details_top10_hidden"))
+    # All users now have full access - always show Top-10 holders (with value or "—")
+    pct = topk_share
+    pct_str = f"{pct:.2f}%" if pct is not None else "—"
+    add_lines.append(T("details_top10", pct=pct_str))
 
     liq_usd = (p.get("liquidity") or {}).get("usd")
     vol24 = (p.get("volume") or {}).get("h24")
@@ -1964,7 +1945,7 @@ def build_full_token_text(p: Dict[str, Any], extra: Optional[Dict[str, Any]],
                                                age_hours, mint_active,
                                                freeze_active, topk_share)
 
-    plan_hint = "" if is_pro else T("details_plan_hint")
+    plan_hint = ""  # All users now have full access - no upgrade hint needed
 
     be_block = birdeye_kv_block(extra)
 
@@ -1991,18 +1972,15 @@ def build_full_token_text(p: Dict[str, Any], extra: Optional[Dict[str, Any]],
     if age_dt is not None:
         core_lines.append(T("card_age", age=age_str))
 
-    if is_pro:
-        if holders is not None:
-            core_lines.append(T("card_holders", holders=f"{holders:,}"))
-        else:
-            core_lines.append(T("card_holders", holders=T("fmt_dash")))
-        if lp_lock is not None:
-            core_lines.append(T("card_lp_locked", lp=f"{lp_lock:.1f}"))
-        else:
-            core_lines.append(T("card_lp_locked", lp=T("fmt_dash")))
+    # All users now have full access - no tier restrictions
+    if holders is not None:
+        core_lines.append(T("card_holders", holders=f"{holders:,}"))
     else:
-        core_lines.append(T("card_holders_hidden"))
-        core_lines.append(T("card_lp_locked_hidden"))
+        core_lines.append(T("card_holders", holders=T("fmt_dash")))
+    if lp_lock is not None:
+        core_lines.append(T("card_lp_locked", lp=f"{lp_lock:.1f}"))
+    else:
+        core_lines.append(T("card_lp_locked", lp=T("fmt_dash")))
 
     if risk_score < 100:
         core_lines.append(T("card_risk_score", score=risk_score))
@@ -2116,9 +2094,9 @@ async def my_handler(m: Message):
         await m.answer(T("no_key"), **MSG_KW)
         return
     valid, msg = is_key_valid_for_product(key)
-    tier = "PRO" if is_pro_user(user_id) else "Free"
+    # All users now have full access - no tier distinction
     if valid:
-        await m.answer(T("my_status_valid", msg=msg, tier=tier), **MSG_KW)
+        await m.answer(T("my_status_valid", msg=msg), **MSG_KW)
     else:
         await m.answer(T("my_status_invalid", msg=msg), **MSG_KW)
 
@@ -2146,7 +2124,7 @@ async def scan_handler(m: Message):
         return
 
     is_pro = is_pro_user(user_id)
-    cooldown = SCAN_COOLDOWN_PRO_SEC if is_pro else SCAN_COOLDOWN_SEC
+    cooldown = SCAN_COOLDOWN_SEC  # All users have same cooldown now
 
     now_ts = int(time.time())
     last_ts = get_last_scan_ts(user_id)
@@ -3084,7 +3062,7 @@ async def research_menu_callback_handler(cb: CallbackQuery):
             return
 
         is_pro = is_pro_user(user_id)
-        cooldown = SCAN_COOLDOWN_PRO_SEC if is_pro else SCAN_COOLDOWN_SEC
+        cooldown = SCAN_COOLDOWN_SEC  # All users have same cooldown now
 
         now_ts = int(time.time())
         last_ts = get_last_scan_ts(user_id)
