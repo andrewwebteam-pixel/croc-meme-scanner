@@ -25,7 +25,6 @@ BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "").strip()
 
 SCAN_COOLDOWN_SEC = int(os.getenv("SCAN_COOLDOWN_SEC", "30"))
-SCAN_COOLDOWN_PRO_SEC = int(os.getenv("SCAN_COOLDOWN_PRO_SEC", "10"))
 
 assert BOT_TOKEN, "BOT_TOKEN is required"
 
@@ -304,6 +303,16 @@ STR = {
     "➕ Add Alert",
     "btn_remove_alert":
     "➖ Remove Alert",
+    "links_header":
+    "🌐 Official links:",
+    "link_website":
+    "• [Website]({url})",
+    "link_twitter":
+    "• [Twitter]({url})",
+    "link_discord":
+    "• [Discord]({url})",
+    "link_medium":
+    "• [Medium]({url})",
 }
 
 
@@ -363,7 +372,7 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
         ],
         [
             KeyboardButton(text="🔔 Alerts"),
-            KeyboardButton(text="🧾 My Tier"),
+            KeyboardButton(text="🧾 My Access"),
             KeyboardButton(text="❔ Help")
         ],
         [KeyboardButton(text="🚪 Logout")],
@@ -458,6 +467,13 @@ def db():
 
     try:
         conn.execute(
+            "ALTER TABLE access_keys ADD COLUMN duration_months INTEGER")
+        print("[DB] Added duration_months column to access_keys table")
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        conn.execute(
             "ALTER TABLE favorites ADD COLUMN added_at INTEGER NOT NULL DEFAULT 0"
         )
         print("[DB] Added added_at column to favorites table")
@@ -471,6 +487,13 @@ def db():
             FOREIGN KEY(access_key) REFERENCES access_keys(access_key)
         )
     """)
+    
+    try:
+        conn.execute(
+            "ALTER TABLE user_access ADD COLUMN username TEXT")
+        print("[DB] Added username column to user_access table")
+    except sqlite3.OperationalError:
+        pass
     conn.execute("""
         CREATE TABLE IF NOT EXISTS user_throttle (
             user_id INTEGER PRIMARY KEY,
@@ -540,20 +563,63 @@ def seed_initial_keys():
 def key_info(access_key: str) -> Optional[tuple]:
     conn = db()
     cur = conn.execute(
-        "SELECT access_key, product, expires_at, tier FROM access_keys WHERE access_key = ?",
+        "SELECT access_key, product, expires_at, tier, duration_months FROM access_keys WHERE access_key = ?",
         (access_key, ))
     row = cur.fetchone()
     conn.close()
     return row
 
 
-def bind_user(user_id: int, access_key: str):
+def bind_user(user_id: int, access_key: str, username: str = "") -> tuple[bool, str]:
+    """Bind a user to an access key with expiry calculation and one-user-per-key validation.
+    
+    Returns:
+        tuple[bool, str]: (success, message)
+    """
     conn = db()
+    
+    # Fetch key info including duration_months
+    cur = conn.execute(
+        "SELECT expires_at, duration_months FROM access_keys WHERE access_key = ?",
+        (access_key,))
+    key_row = cur.fetchone()
+    
+    if not key_row:
+        conn.close()
+        return False, "Invalid key."
+    
+    expires_at, duration_months = key_row
+    
+    # If expires_at is NULL and duration_months is present, calculate new expiry
+    if expires_at is None and duration_months is not None:
+        new_expiry = datetime.utcnow() + timedelta(days=duration_months * 30)
+        expires_at = new_expiry.date().isoformat()
+        conn.execute(
+            "UPDATE access_keys SET expires_at = ? WHERE access_key = ?",
+            (expires_at, access_key))
+        conn.commit()
+    
+    # Check if this access_key is already linked to a different username
+    cur = conn.execute(
+        "SELECT username FROM user_access WHERE access_key = ?",
+        (access_key,))
+    existing_row = cur.fetchone()
+    
+    if existing_row:
+        existing_username = existing_row[0] or ""
+        # If key is already used by a different user, reject
+        if existing_username and existing_username != username:
+            conn.close()
+            return False, f"This key is already in use by another account (@{existing_username})."
+    
+    # Store or update user_id, access_key, and username in user_access
     conn.execute(
-        "INSERT OR REPLACE INTO user_access(user_id, access_key) VALUES (?, ?)",
-        (user_id, access_key))
+        "INSERT OR REPLACE INTO user_access(user_id, access_key, username) VALUES (?, ?, ?)",
+        (user_id, access_key, username))
     conn.commit()
     conn.close()
+    
+    return True, "Key activated successfully."
 
 
 def get_user_key(user_id: int) -> Optional[str]:
@@ -588,7 +654,7 @@ def is_key_valid_for_product(access_key: str) -> tuple[bool, str]:
     info = key_info(access_key)
     if not info:
         return False, "Invalid key."
-    _, product, expires_at, _ = info
+    _, product, expires_at, _, _ = info  # Updated to unpack 5 values (added duration_months)
     if product != PRODUCT:
         return False, "This key is for a different product."
     if expires_at is None:
@@ -975,13 +1041,15 @@ async def fetch_latest_sol_pairs(
     )
 
     # Semaphore to limit concurrent API requests (prevent 429/403 errors)
-    sem = asyncio.Semaphore(10)
+    # Using 8 concurrent for metadata to avoid rate limits
+    sem = asyncio.Semaphore(8)
 
     async def fetch_with_limit(session, mint):
         async with sem:
             return await asyncio.gather(birdeye_overview(session, mint),
                                         birdeye_token_security(session, mint),
                                         fetch_creation_time(mint),
+                                        birdeye_token_metadata(session, mint),
                                         return_exceptions=True)
 
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(
@@ -1002,12 +1070,13 @@ async def fetch_latest_sol_pairs(
             listing_created_at = token_info.get(
                 "created")  # liquidityAddedAt from new_listing endpoint
 
-            result_overview, result_security, result_creation = results[i]
+            result_overview, result_security, result_creation, result_metadata = results[i]
 
             # Handle exceptions - ensure we have dict types, not exceptions
             overview: Dict[str, Any] = {}
             security: Optional[Dict[str, Any]] = None
             creation_ts: Optional[int] = None
+            metadata: Optional[Dict[str, Any]] = None
 
             if isinstance(result_overview, Exception):
                 print(
@@ -1040,6 +1109,12 @@ async def fetch_latest_sol_pairs(
                 # creation_ts already set to None above
             elif result_creation and isinstance(result_creation, int):
                 creation_ts = result_creation
+
+            if isinstance(result_metadata, Exception):
+                # Silently ignore metadata errors - not critical
+                pass
+            elif result_metadata and isinstance(result_metadata, dict):
+                metadata = result_metadata
 
             # Build pair object with all data - never skip tokens
             symbol = overview.get("symbol") or f"TOKEN_{mint[:6]}"
@@ -1090,6 +1165,9 @@ async def fetch_latest_sol_pairs(
             if security:
                 top10_pct = extract_top10_holders(security)
 
+            # Extract links from metadata
+            links = extract_links(metadata)
+
             pair = {
                 "baseToken": {
                     "symbol": symbol,
@@ -1108,6 +1186,7 @@ async def fetch_latest_sol_pairs(
                 created_at_ts,  # Unix timestamp (seconds) or None
                 "top10_pct": top10_pct,  # Explicitly set (value or None)
                 "chainId": "solana",
+                "links": links,  # Official links (website, twitter, discord, medium)
             }
 
             # Store security data if available
@@ -1354,6 +1433,63 @@ async def birdeye_markets(session: aiohttp.ClientSession,
     except Exception as e:
         print(f"[BIRDEYE] markets exception for {mint[:8]}...: {e}")
         return None
+
+
+async def birdeye_token_metadata(session: aiohttp.ClientSession,
+                                  mint: str) -> Optional[Dict[str, Any]]:
+    """
+    Fetch token metadata from Birdeye v3 API.
+    Returns data with extensions field containing website, twitter, discord, medium links.
+    """
+    if not BIRDEYE_API_KEY:
+        return None
+    url = f"{BIRDEYE_BASE}/defi/v3/token/meta-data/single"
+    headers = {
+        "accept": "application/json",
+        "X-API-KEY": BIRDEYE_API_KEY,
+        "x-chain": "solana"
+    }
+    params = {"address": mint}
+    try:
+        await api_rate_limit()
+        async with session.get(url,
+                               headers=headers,
+                               params=params,
+                               timeout=aiohttp.ClientTimeout(total=10)) as r:
+            if r.status == 403 or r.status == 429:
+                print(f"[BIRDEYE] metadata {r.status} for {mint[:8]}...")
+                return None
+            if r.status != 200:
+                print(f"[BIRDEYE] metadata HTTP {r.status} for {mint[:8]}...")
+                return None
+            j = await r.json()
+            if not j or not j.get("success"):
+                return None
+            return j.get("data")
+    except Exception as e:
+        print(f"[BIRDEYE] metadata exception for {mint[:8]}...: {e}")
+        return None
+
+
+def extract_links(metadata: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """
+    Extract official links (website, twitter, discord, medium) from metadata extensions.
+    Returns dictionary with only non-empty values.
+    """
+    links = {}
+    if not metadata:
+        return links
+    
+    extensions = metadata.get("extensions")
+    if not extensions or not isinstance(extensions, dict):
+        return links
+    
+    for key in ["website", "twitter", "discord", "medium"]:
+        value = extensions.get(key)
+        if value and isinstance(value, str) and value.strip():
+            links[key] = value.strip()
+    
+    return links
 
 
 async def fetch_pair_data(session: aiohttp.ClientSession,
@@ -1732,6 +1868,30 @@ def build_summary_text(p: Dict[str, Any],
     return "\n".join(lines)
 
 
+def links_block(links: Optional[Dict[str, str]]) -> str:
+    """
+    Format official links (website, twitter, discord, medium) for display.
+    Returns formatted block with clickable links or empty string if no links.
+    """
+    if not links:
+        return ""
+    
+    lines = []
+    if links.get("website"):
+        lines.append(T("link_website", url=links["website"]))
+    if links.get("twitter"):
+        lines.append(T("link_twitter", url=links["twitter"]))
+    if links.get("discord"):
+        lines.append(T("link_discord", url=links["discord"]))
+    if links.get("medium"):
+        lines.append(T("link_medium", url=links["medium"]))
+    
+    if not lines:
+        return ""
+    
+    return T("links_header") + "\n" + "\n".join(lines)
+
+
 def birdeye_kv_block(extra: Optional[Dict[str, Any]]) -> str:
     if not extra:
         return T("birdeye_empty")
@@ -1844,6 +2004,9 @@ def build_details_text(p: Dict[str, Any], extra: Optional[Dict[str, Any]],
     be_block = birdeye_kv_block(extra)
 
     ex_block = exchanges_block(mkts, is_pro)
+    
+    # Add official links block
+    links_blk = links_block(p.get("links"))
 
     base = p.get("baseToken", {}) or {}
     symbol = base.get("symbol") or T("unknown_token_symbol")
@@ -1884,7 +2047,7 @@ def build_details_text(p: Dict[str, Any], extra: Optional[Dict[str, Any]],
 
     core = "\n".join(core_lines)
 
-    parts = [core, "\n".join(add_lines), plan_hint, be_block, ex_block]
+    parts = [core, "\n".join(add_lines), plan_hint, links_blk, be_block, ex_block]
     parts = [x.strip() for x in parts if x and x.strip()]
     return "\n\n".join(parts)
 
@@ -1950,6 +2113,9 @@ def build_full_token_text(p: Dict[str, Any], extra: Optional[Dict[str, Any]],
     be_block = birdeye_kv_block(extra)
 
     ex_block = exchanges_block(mkts, is_pro)
+    
+    # Add official links block
+    links_blk = links_block(p.get("links"))
 
     base = p.get("baseToken", {}) or {}
     symbol = base.get("symbol") or T("unknown_token_symbol")
@@ -1990,7 +2156,7 @@ def build_full_token_text(p: Dict[str, Any], extra: Optional[Dict[str, Any]],
 
     core = "\n".join(core_lines)
 
-    parts = [core, "\n".join(add_lines), plan_hint, be_block, ex_block]
+    parts = [core, "\n".join(add_lines), plan_hint, links_blk, be_block, ex_block]
     parts = [x.strip() for x in parts if x and x.strip()]
     return "\n\n".join(parts)
 
@@ -2242,6 +2408,8 @@ async def token_handler(m: Message):
         birdeye_price_val = None
         topk_share = None
 
+        metadata = None
+        
         if BIRDEYE_API_KEY:
             # For /token command: fetch only price, liquidity, security data
             # Age is deliberately NOT fetched or used (user requirement)
@@ -2250,6 +2418,7 @@ async def token_handler(m: Message):
                                                session, mint),
                                            birdeye_markets(session, mint),
                                            birdeye_price(session, mint),
+                                           birdeye_token_metadata(session, mint),
                                            return_exceptions=True)
             extra = results[0] if not isinstance(results[0],
                                                  BaseException) else None
@@ -2259,6 +2428,8 @@ async def token_handler(m: Message):
                                                 BaseException) else None
             birdeye_price_val = results[3] if not isinstance(
                 results[3], BaseException) else None
+            metadata = results[4] if not isinstance(results[4],
+                                                    BaseException) else None
 
         if not extra:
             print(f"[TOKEN] Birdeye failed for {mint[:8]}...")
@@ -2269,6 +2440,9 @@ async def token_handler(m: Message):
 
         if security_info and isinstance(security_info, dict):
             topk_share = extract_top10_holders(security_info)
+
+        # Extract links from metadata
+        links = extract_links(metadata)
 
         # For /token command: Age is deliberately set to None (no fetching, no display, no risk penalty)
         p = {
@@ -2292,6 +2466,7 @@ async def token_handler(m: Message):
             None,
             "chainId":
             "solana",
+            "links": links,
         }
 
     if not extra and p.get("priceUsd") is None:
@@ -3625,7 +3800,7 @@ async def text_input_handler(m: Message):
     elif text_input == "🔔 Alerts":
         await alerts_menu_handler(m)
         return
-    elif text_input == "🧾 My Tier":
+    elif text_input == "🧾 My Access":
         await my_handler(m)
         return
     elif text_input == "❔ Help":
@@ -3641,10 +3816,14 @@ async def text_input_handler(m: Message):
     candidate = text_input
     ok, msg = is_key_valid_for_product(candidate)
     if ok:
-        bind_user(user_id, candidate)
-        await m.answer(T("key_accepted", msg=msg),
-                       reply_markup=main_menu_keyboard(),
-                       **MSG_KW)
+        username = m.from_user.username or ""
+        bind_ok, bind_msg = bind_user(user_id, candidate, username)
+        if bind_ok:
+            await m.answer(T("key_accepted", msg=msg),
+                           reply_markup=main_menu_keyboard(),
+                           **MSG_KW)
+        else:
+            await m.answer(T("key_rejected", msg=bind_msg), **MSG_KW)
     else:
         await m.answer(T("key_rejected", msg=msg), **MSG_KW)
 
