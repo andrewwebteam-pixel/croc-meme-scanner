@@ -23,8 +23,6 @@ DB_PATH = os.getenv("DB_PATH", "./keys.db")
 PRODUCT = os.getenv("PRODUCT", "meme_scanner")
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY", "").strip()
 SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "").strip()
-HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "").strip()
-HELIUS_RPC_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}" if HELIUS_API_KEY else ""
 
 SCAN_COOLDOWN_SEC = int(os.getenv("SCAN_COOLDOWN_SEC", "30"))
 SCAN_COOLDOWN_PRO_SEC = int(os.getenv("SCAN_COOLDOWN_PRO_SEC", "10"))
@@ -1504,55 +1502,6 @@ async def fetch_creation_time(mint: str) -> Optional[int]:
         return None
 
 
-async def get_creation_time_helius(mint: str) -> Optional[int]:
-    """
-    Fetch token creation timestamp from Helius RPC using getSignaturesForAddress.
-    Returns Unix timestamp (seconds) from the oldest signature's blockTime or None.
-    This is the PRIMARY source for /token command age display.
-    """
-    if not HELIUS_RPC_URL:
-        print(f"[HELIUS] No RPC URL configured, skipping")
-        return None
-    
-    rpc_url = HELIUS_RPC_URL
-    body = {
-        "jsonrpc": "2.0",
-        "id": "helius-creation-time",
-        "method": "getSignaturesForAddress",
-        "params": [mint, {"limit": 20, "commitment": "confirmed"}]
-    }
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(rpc_url, json=body, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status == 200:
-                    response_data = await resp.json()
-                    signatures = response_data.get("result", [])
-                    
-                    if not signatures:
-                        print(f"[HELIUS] No signatures found for {mint[:8]}")
-                        return None
-                    
-                    # Get oldest signature (last element in array, newest→oldest order)
-                    oldest_sig = signatures[-1]
-                    block_time = oldest_sig.get("blockTime")
-                    
-                    if block_time and isinstance(block_time, (int, float)):
-                        ts = int(block_time)
-                        print(f"[HELIUS] {mint[:8]} creation time from oldest signature: {ts} -> {datetime.fromtimestamp(ts, tz=timezone.utc)}")
-                        return ts
-                    else:
-                        print(f"[HELIUS] {mint[:8]} oldest signature has no blockTime")
-                        return None
-                else:
-                    print(f"[HELIUS] HTTP {resp.status} for {mint[:8]}")
-                    return None
-                    
-    except Exception as e:
-        print(f"[HELIUS] Error fetching creation time for {mint[:8]}: {e}")
-        return None
-
-
 def extract_holders(data: Dict[str, Any]) -> Optional[int]:
     for k in ("holders", "holder", "holder_count", "holdersCount",
               "uniqueHolders"):
@@ -1644,7 +1593,7 @@ def exchanges_block(markets: Optional[List[Dict[str, Any]]],
 
 
 def calc_risk_score(liquidity: Optional[float], volume: Optional[float],
-                    lp_lock_pct: Optional[float], token_age_hours: float,
+                    lp_lock_pct: Optional[float], token_age_hours: Optional[float],
                     mint_auth_active: bool, freeze_auth_active: bool,
                     top10_pct: Optional[float]) -> tuple[int, List[str]]:
     """Calculate risk score (0-100) where 100 = low risk. Returns (score, reasons)."""
@@ -1663,7 +1612,7 @@ def calc_risk_score(liquidity: Optional[float], volume: Optional[float],
         score -= 15
         reasons.append(T("risk_low_lp_lock"))
 
-    if token_age_hours < 6:
+    if token_age_hours is not None and token_age_hours < 6:
         score -= 20
         reasons.append(T("risk_new_token"))
 
@@ -1748,7 +1697,7 @@ def build_summary_text(p: Dict[str, Any],
         age_dt = from_unix_ms(p.get("pairCreatedAt"))
 
     age_hours = (datetime.now(tz=timezone.utc) -
-                 age_dt).total_seconds() / 3600 if age_dt else 0
+                 age_dt).total_seconds() / 3600 if age_dt else None
     risk_score, risk_reasons = calc_risk_score(liq_usd, vol24, lp_lock,
                                                age_hours, mint_active,
                                                freeze_active, top10_share)
@@ -1898,7 +1847,7 @@ def build_details_text(p: Dict[str, Any], extra: Optional[Dict[str, Any]],
         print(f"[AGE] No creation timestamp found, showing dash")
 
     age_hours = (datetime.now(tz=timezone.utc) -
-                 age_dt).total_seconds() / 3600 if age_dt else 0
+                 age_dt).total_seconds() / 3600 if age_dt else None
     risk_score, risk_reasons = calc_risk_score(liq_usd, vol24, lp_lock,
                                                age_hours, mint_active,
                                                freeze_active, topk_share)
@@ -1924,8 +1873,11 @@ def build_details_text(p: Dict[str, Any], extra: Optional[Dict[str, Any]],
         T("card_liquidity", liq=liq_txt),
         T("card_fdv", fdv=fdv_txt),
         T("card_volume", vol=vol_txt),
-        T("card_age", age=age_str),
     ]
+    
+    # Only show Age line if timestamp is available (for /scan, not /token)
+    if age_dt is not None:
+        core_lines.append(T("card_age", age=age_str))
 
     if is_pro:
         if holders is not None:
@@ -2007,7 +1959,7 @@ def build_full_token_text(p: Dict[str, Any], extra: Optional[Dict[str, Any]],
         print(f"[AGE] No creation timestamp found, showing dash")
 
     age_hours = (datetime.now(tz=timezone.utc) -
-                 age_dt).total_seconds() / 3600 if age_dt else 0
+                 age_dt).total_seconds() / 3600 if age_dt else None
     risk_score, risk_reasons = calc_risk_score(liq_usd, vol24, lp_lock,
                                                age_hours, mint_active,
                                                freeze_active, topk_share)
@@ -2033,8 +1985,11 @@ def build_full_token_text(p: Dict[str, Any], extra: Optional[Dict[str, Any]],
         T("card_liquidity", liq=liq_txt),
         T("card_fdv", fdv=fdv_txt),
         T("card_volume", vol=vol_txt),
-        T("card_age", age=age_str),
     ]
+    
+    # Only show Age line if timestamp is available (for /scan, not /token)
+    if age_dt is not None:
+        core_lines.append(T("card_age", age=age_str))
 
     if is_pro:
         if holders is not None:
@@ -2309,16 +2264,14 @@ async def token_handler(m: Message):
         birdeye_price_val = None
         topk_share = None
 
-        creation_ts = None
         if BIRDEYE_API_KEY:
-            # Use Helius RPC as PRIMARY source for creation time (faster, more reliable than Birdeye)
-            # Birdeye provides price, liquidity, security; RPC provides accurate blockchain timestamp
+            # For /token command: fetch only price, liquidity, security data
+            # Age is deliberately NOT fetched or used (user requirement)
             results = await asyncio.gather(birdeye_overview(session, mint),
                                            birdeye_token_security(
                                                session, mint),
                                            birdeye_markets(session, mint),
                                            birdeye_price(session, mint),
-                                           get_creation_time_helius(mint),
                                            return_exceptions=True)
             extra = results[0] if not isinstance(results[0],
                                                  BaseException) else None
@@ -2328,8 +2281,6 @@ async def token_handler(m: Message):
                                                 BaseException) else None
             birdeye_price_val = results[3] if not isinstance(
                 results[3], BaseException) else None
-            creation_ts = results[4] if not isinstance(results[4],
-                                                       BaseException) else None
 
         if not extra:
             print(f"[TOKEN] Birdeye failed for {mint[:8]}...")
@@ -2341,14 +2292,7 @@ async def token_handler(m: Message):
         if security_info and isinstance(security_info, dict):
             topk_share = extract_top10_holders(security_info)
 
-        # Use Helius RPC timestamp directly (PRIMARY and ONLY source)
-        created_at_ts = None
-        if creation_ts and isinstance(creation_ts, int):
-            created_at_ts = creation_ts
-            print(f"[TOKEN] {mint[:8]}: Using timestamp from Helius RPC: {created_at_ts}")
-        else:
-            print(f"[TOKEN] {mint[:8]}: No creation timestamp from RPC, will display '—'")
-
+        # For /token command: Age is deliberately set to None (no fetching, no display, no risk penalty)
         p = {
             "baseToken": {
                 "symbol": (extra or {}).get("symbol") or "",
@@ -2367,7 +2311,7 @@ async def token_handler(m: Message):
                 or (extra or {}).get("v24h") or (extra or {}).get("volume24h")
             },
             "pairCreatedAt":
-            created_at_ts,
+            None,
             "chainId":
             "solana",
         }
