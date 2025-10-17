@@ -4,7 +4,7 @@ import os
 import sqlite3
 import time
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
 
 from aiogram import Bot, Dispatcher, F
